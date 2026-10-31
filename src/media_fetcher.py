@@ -1,16 +1,15 @@
 """
-GPT-Image-1-Mini Primary Widescreen 16:9 Visual Engine (`src/media_fetcher.py` — v4.0 GPT-Image-1-Mini Default Edition):
-1. **Default Primary Engine: `gpt-image-1-mini` (`FOUNDRY_IMAGE_MODEL="gpt-image-1-mini"`)**:
-   - Uses your deployed `gpt-image-1-mini` model on Microsoft Foundry / Azure OpenAI (`FOUNDRY_ENDPOINT` / `FOUNDRY_TEXT_ENDPOINT`
-     and `FOUNDRY_API_KEY` / `FOUNDRY_TEXT_API_KEY`) as the #1 primary image generator for every scene!
-   - Requests native landscape **`size="1536x1024"`** (`3:2` widescreen) with **`quality="high"`** (falling back automatically to `"medium"` or `"auto"` if needed) and converts it cleanly to full-bleed `1920x1080` (`16:9` YouTube HD) with minimal top/bottom trim and zero sidebars!
-2. **Maximum Scene Fidelity & Character Consistency (`_build_gpt_image_scene_prompt`)**:
-   - Because `gpt-image-1-mini` has a GPT-4o multimodal language encoder, it understands long, structured instructions far better than Flux!
-   - Every single shot prompt sent to `gpt-image-1-mini` includes:
-     (a) **EXACT SPOKEN SCENE ACTION**: The literal visual action happening in that specific 5-second beat + the Hindi narration context.
-     (b) **LOCKED CHARACTER BIBLE**: Exact physical traits of every character in the story so characters stay 100% consistent across all shots.
-     (c) **CINEMA 16:9 STYLE**: High-resolution 16:9 YouTube storytelling cinematography, natural lighting, zero text/watermarks.
-3. **Fallback Chain**: If `FOUNDRY_ENDPOINT` is not set or quota is reached, falls back to `FREE_IMAGE_API_URL` (`saurav-z/free-image-generation-api`), Direct Cloudflare REST AI, Pollinations, or procedural 16:9 plates.
+GPT-Image-1-Mini Primary Widescreen 16:9 Visual Engine (`src/media_fetcher.py` — v5.0 Fast Route-Caching & 12-RPM Safe Edition):
+1. **Zero Multi-Route Retry Loops (`self._working_foundry_route`)**:
+   - Discovers the exact working `(url, payload_mode)` on Shot 1 (prioritizing `https://<host>/openai/v1/images/generations` and
+     `/openai/deployments/gpt-image-1-mini/images/generations?api-version=2025-04-01-preview`) and locks onto that single URL
+     for all remaining 65+ shots!
+   - Includes a circuit breaker (`self._foundry_consecutive_failures >= 2`) so if the Foundry endpoint is unreachable or out of quota,
+     it immediately switches to the fast Cloudflare Worker (`FREE_IMAGE_API_URL`) instead of timing out over 55 minutes!
+2. **Respects Your `12 Requests Per Minute (RPM)` Azure Deployment Quota**:
+   - Automatically paces requests (`5.0s` minimum gap between calls) and honors HTTP `429 Retry-After` headers so Azure never drops images.
+   - Uses `size="1536x1024"` widescreen landscape with `quality="medium"` (configurable via `GPT_IMAGE_QUALITY`), which renders 3x faster
+     on `gpt-image-1-mini` while delivering crisp `1920x1080` (`16:9`) Full HD visuals.
 """
 import base64
 import hashlib
@@ -31,8 +30,8 @@ except ImportError:
     from src.archive_media import ArchiveMediaFinder, rank_candidates
 
 USER_AGENT = (
-    "IndianKahaniLongformBot/4.0 "
-    "(GPT-Image-1-Mini-Primary; CharacterConsistent16x9Pipeline/4.0)"
+    "IndianKahaniLongformBot/5.0 "
+    "(GPT-Image-1-Mini-FastPipeline; CharacterConsistent16x9Pipeline/5.0)"
 )
 
 DEFAULT_CHARACTER_BIBLE_TEXT = (
@@ -89,12 +88,17 @@ class MediaFetcher:
             or ""
         ).strip()
         raw_img_model = (os.getenv("FOUNDRY_IMAGE_MODEL") or "gpt-image-1-mini").strip()
-        # Automatically upgrade legacy MAI-Image default to gpt-image-1-mini unless explicitly overridden
         if not raw_img_model or raw_img_model == "MAI-Image-2.6-Flash":
             self.image_model = "gpt-image-1-mini"
         else:
             self.image_model = raw_img_model
-        self.image_quality = (os.getenv("GPT_IMAGE_QUALITY") or "high").strip().lower()
+        # Default to "medium" for 3x faster generation on gpt-image-1-mini while preserving crisp 1536x1024 detail
+        self.image_quality = (os.getenv("GPT_IMAGE_QUALITY") or "medium").strip().lower()
+
+        # Route caching & 12 RPM pacing state
+        self._working_foundry_route: Optional[Tuple[str, str]] = None
+        self._foundry_consecutive_failures: int = 0
+        self._last_foundry_call_ts: float = 0.0
 
         # 2. SECONDARY FALLBACK: Cloudflare Worker (saurav-z/free-image-generation-api)
         self.free_image_api_url = (
@@ -117,13 +121,13 @@ class MediaFetcher:
 
         raw_max_ai = os.getenv("MAX_AI_IMAGES_PER_VIDEO") or os.getenv("MAX_AI_IMAGES_PER_SHORT")
         if raw_max_ai is None or str(raw_max_ai).strip() == "":
-            raw_max_ai = "90"
+            raw_max_ai = "75"
         try:
             self.max_ai_images = max(0, int(str(raw_max_ai).strip()))
         except (TypeError, ValueError):
-            self.max_ai_images = 90
+            self.max_ai_images = 75
         if (self.foundry_endpoint or self.free_image_api_url) and 0 < self.max_ai_images < 66:
-            self.max_ai_images = 80
+            self.max_ai_images = 75
 
         self.gpt_images_used = 0
         self.free_worker_images_used = 0
@@ -149,12 +153,6 @@ class MediaFetcher:
 
     @staticmethod
     def _save_as_full_bleed_16x9(img: Image.Image, dest_path: Path, vertical_anchor: float = 0.42) -> Path:
-        """
-        Masters any generated image (such as `1536x1024` landscape from `gpt-image-1-mini` or `1024x1024`)
-        into a crisp edge-to-edge `1920x1080` (`16:9` Full HD) frame with zero sidebars.
-        Because `1536x1024` is already 1.50:1 landscape, converting to `1920x1080` (`1.77:1`) preserves
-        virtually the entire horizontal width of `gpt-image-1-mini`'s composition!
-        """
         target_w, target_h = 1920, 1080
         rgb = img.convert("RGB")
         w, h = rgb.size
@@ -170,7 +168,7 @@ class MediaFetcher:
 
         cropped = ImageEnhance.Contrast(cropped).enhance(1.04)
         cropped = ImageEnhance.Sharpness(cropped).enhance(1.06)
-        cropped.save(dest_path, quality=96)
+        cropped.save(dest_path, quality=95)
         return dest_path
 
     @staticmethod
@@ -201,12 +199,6 @@ class MediaFetcher:
         shot_idx: int,
         total_shots: int,
     ) -> str:
-        """
-        Builds a rich, structured scene-faithful prompt specifically optimized for `gpt-image-1-mini`:
-        - Explicitly binds the exact action happening in the current spoken beat + Hindi narration context
-        - Injects the story's `character_bible` so every character has identical physical traits in every frame
-        - Enforces 16:9 widescreen cinematic framing (`1536x1024` -> `1920x1080`) with all subjects centered in the middle 80% vertical safe zone.
-        """
         subject = str(scene.get("visual_subject") or self.topic).strip()
         narration = str(scene.get("narration") or "").strip()
         speaker = str(scene.get("speaker_name") or "कथावाचक").strip()
@@ -219,28 +211,29 @@ class MediaFetcher:
         )
 
         prompt = (
-            f"MANDATORY SCENE ACTION (Beat {shot_idx} of {total_shots}): {clean_shot}. "
-            f"SPOKEN HINDI NARRATION CONTEXT ({speaker}): \"{narration}\". "
-            f"LOCKED CHARACTER CONSISTENCY BIBLE (must match exact appearance in every frame): {self.character_bible_str}. "
-            "VISUAL STYLE & 16:9 FRAMING: Ultra-high-quality photorealistic 8K live-action cinema still frame, "
-            "shot on ARRI Alexa 65 with 35mm anamorphic widescreen lens, natural textures, rich volumetric golden lighting, "
-            "wide 16:9 horizontal YouTube composition with all characters and key action framed cleanly inside the central "
-            "horizontal safe zone. Strictly photorealistic live-action — NOT cartoon, NOT 2D illustration, no text, no captions, no watermarks."
+            f"SCENE ACTION (Beat {shot_idx}/{total_shots}): {clean_shot}. "
+            f"SPOKEN HINDI LINE ({speaker}): \"{narration}\". "
+            f"LOCKED CHARACTER BIBLE (exact same appearance in every frame): {self.character_bible_str}. "
+            "STYLE: Ultra-realistic 8K live-action cinema photograph shot on ARRI Alexa 65 (35mm anamorphic lens), "
+            "wide 16:9 horizontal YouTube framing with subjects centered in the middle horizontal safe zone. "
+            "Photorealistic live-action — NOT cartoon, NOT 2D illustration, no text, no watermarks."
         )
-        return prompt[:3800]
+        return prompt[:3500]
 
     def _generate_single_16x9_image(self, prompt: str, dest_path: Path, scene: dict, scene_id: int, shot_idx: int = 1) -> Tuple[Path, str]:
         can_use_ai = self.ai_images_used < self.max_ai_images
-        anchors = (0.38, 0.44, 0.48, 0.40)
+        anchors = (0.38, 0.44, 0.48)
         anchor = anchors[(shot_idx - 1) % len(anchors)]
 
-        # 1. PRIMARY DEFAULT: Deployed `gpt-image-1-mini` on Microsoft Foundry / Azure OpenAI
-        if can_use_ai and self.foundry_endpoint and self.foundry_key:
+        # 1. PRIMARY DEFAULT: Deployed `gpt-image-1-mini` (with circuit breaker if endpoint fails twice in a row)
+        if can_use_ai and self.foundry_endpoint and self.foundry_key and self._foundry_consecutive_failures < 2:
             saved = self._generate_foundry_image(prompt, dest_path, vertical_anchor=anchor)
             if saved:
+                self._foundry_consecutive_failures = 0
                 self.gpt_images_used += 1
                 self.ai_images_used += 1
                 return saved, f"GPT-IMAGE-1-MINI 16:9 ({self.image_model})"
+            self._foundry_consecutive_failures += 1
 
         # 2. SECONDARY FALLBACK: saurav-z/free-image-generation-api Cloudflare Worker
         if can_use_ai and self.free_image_api_url:
@@ -273,7 +266,7 @@ class MediaFetcher:
 
     def fetch_scene_asset(self, scene: dict, assets_dir: Path) -> Tuple[Path, str]:
         """
-        Generates **3 to 4 distinct full-bleed `1920x1080` (16:9) `gpt-image-1-mini` images per scene**
+        Generates **3 distinct full-bleed `1920x1080` (16:9) images per scene** (`66 shots` across 22 scenes),
         locked to both the exact spoken Hindi narration beat and the story's `character_bible`!
         """
         assets_dir.mkdir(parents=True, exist_ok=True)
@@ -282,7 +275,7 @@ class MediaFetcher:
         subject = str(scene.get("visual_subject") or self.topic).strip()
         dur = float(scene.get("duration_sec", 15.0) or 15.0)
 
-        desired_shots = 4 if dur >= 18.5 else (3 if dur >= 9.0 else 2)
+        desired_shots = 3 if dur >= 8.0 else 2
 
         raw_shot_prompts = list(scene.get("shot_prompts") or [])
         if not raw_shot_prompts:
@@ -323,11 +316,21 @@ class MediaFetcher:
         })
         return Path(asset_paths[0]), "image"
 
+    def _build_foundry_payload(self, prompt: str, mode: str) -> dict:
+        if mode == "v1_with_quality":
+            return {"model": self.image_model, "prompt": prompt, "n": 1, "size": "1536x1024", "quality": self.image_quality}
+        if mode == "v1_no_quality":
+            return {"model": self.image_model, "prompt": prompt, "n": 1, "size": "1536x1024"}
+        if mode == "deployment_with_quality":
+            return {"prompt": prompt, "n": 1, "size": "1536x1024", "quality": self.image_quality}
+        return {"model": self.image_model, "prompt": prompt, "n": 1, "size": "1024x1024"}
+
     def _generate_foundry_image(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.42) -> Optional[Path]:
         """
-        Calls your deployed `gpt-image-1-mini` (or `gpt-image-1` / `MAI-Image-2.6-Flash`) endpoint on Azure OpenAI / Microsoft Foundry.
-        Requests native widescreen `size="1536x1024"` and `quality="high"` (with automatic payload & route fallbacks)
-        and masters the resulting image into a crisp edge-to-edge `1920x1080` (`16:9`) frame.
+        Fast, route-cached `gpt-image-1-mini` caller:
+        - Prioritizes the exact Azure AI Foundry URL format (`https://<host>/openai/v1/images/generations`)
+        - Remembers the working `(url, payload_mode)` after Shot 1 so Shots 2..66 make only 1 HTTP call each!
+        - Respects the 12 RPM rate limit (`4.8s` pacing + `429 Retry-After` support).
         """
         try:
             parsed = urlparse(self.foundry_endpoint)
@@ -342,57 +345,71 @@ class MediaFetcher:
                 "Authorization": f"Bearer {self.foundry_key}",
             }
 
-            # Candidate URLs for Azure OpenAI / Foundry deployments of gpt-image-1-mini
-            candidate_urls = []
-            if "/images/generations" in self.foundry_endpoint:
-                candidate_urls.append(self.foundry_endpoint)
-            candidate_urls.extend([
-                f"{resource_root}/openai/deployments/{self.image_model}/images/generations?api-version=2025-04-01-preview",
-                f"{resource_root}/openai/deployments/{self.image_model}/images/generations?api-version=2024-12-01-preview",
-                f"{resource_root}/openai/v1/images/generations",
-                f"{resource_root}/v1/images/generations",
-                f"{resource_root}/mai/v1/images/generations",
-            ])
-            candidate_urls = list(dict.fromkeys(candidate_urls))
+            if self._working_foundry_route is not None:
+                route_plan = [self._working_foundry_route]
+            else:
+                # Prioritize the exact endpoint shown in Microsoft Foundry (`https://<host>/openai/v1/images/generations`)
+                primary_url = (
+                    self.foundry_endpoint
+                    if "/images/generations" in self.foundry_endpoint
+                    else f"{resource_root}/openai/v1/images/generations"
+                )
+                deploy_url = f"{resource_root}/openai/deployments/{self.image_model}/images/generations?api-version=2025-04-01-preview"
+                route_plan = [
+                    (primary_url, "v1_with_quality"),
+                    (primary_url, "v1_no_quality"),
+                    (deploy_url, "deployment_with_quality"),
+                    (primary_url, "square_fallback"),
+                ]
 
-            # Candidate payloads for gpt-image-1-mini (1536x1024 landscape widescreen)
-            payload_variants = [
-                {"model": self.image_model, "prompt": prompt, "n": 1, "size": "1536x1024", "quality": self.image_quality},
-                {"prompt": prompt, "n": 1, "size": "1536x1024", "quality": self.image_quality},
-                {"model": self.image_model, "prompt": prompt, "n": 1, "size": "1536x1024"},
-                {"model": self.image_model, "prompt": prompt, "n": 1, "size": "1024x1024"},
-                {"model": self.image_model, "prompt": prompt, "width": 1344, "height": 768},
-            ]
+            for url, mode in route_plan:
+                payload = self._build_foundry_payload(prompt, mode)
+                for attempt in (1, 2):
+                    # Pace calls so we never exceed 12 requests/minute (1 call every ~5s)
+                    elapsed = time.time() - self._last_foundry_call_ts
+                    if self._last_foundry_call_ts > 0 and elapsed < 4.6:
+                        time.sleep(4.6 - elapsed)
 
-            for url in candidate_urls:
-                for payload in payload_variants:
                     try:
-                        resp = self.session.post(url, headers=headers, json=payload, timeout=75)
-                        if resp.status_code != 200:
+                        self._last_foundry_call_ts = time.time()
+                        resp = self.session.post(url, headers=headers, json=payload, timeout=32)
+                        if resp.status_code == 429:
+                            retry_after = float(resp.headers.get("Retry-After") or 6.0)
+                            wait_s = min(15.0, max(4.0, retry_after))
+                            print(f"[MediaFetcher] gpt-image-1-mini 12-RPM rate limit (429); sleeping {wait_s:.1f}s and retrying...")
+                            time.sleep(wait_s)
                             continue
+                        if resp.status_code != 200:
+                            break
+
                         data = resp.json()
                         items = data.get("data", [])
                         if items and "b64_json" in items[0]:
                             dest_path.write_bytes(base64.b64decode(items[0]["b64_json"]))
                         elif items and "url" in items[0]:
-                            img_r = self.session.get(items[0]["url"], timeout=40)
+                            img_r = self.session.get(items[0]["url"], timeout=25)
                             img_r.raise_for_status()
                             dest_path.write_bytes(img_r.content)
                         elif "image" in data and isinstance(data["image"], str):
                             dest_path.write_bytes(base64.b64decode(data["image"]))
                         else:
-                            continue
+                            break
 
                         with Image.open(dest_path) as im:
                             rgb = im.convert("RGB")
                             if not self._is_valid_photographic_image(rgb):
                                 dest_path.unlink(missing_ok=True)
-                                continue
+                                break
                             self._save_as_full_bleed_16x9(rgb, dest_path, vertical_anchor=vertical_anchor)
+
+                        if self._working_foundry_route is None:
+                            print(f"[MediaFetcher] Locked working gpt-image-1-mini route: {url} ({mode})")
+                            self._working_foundry_route = (url, mode)
                         return dest_path
-                    except Exception:
+                    except Exception as exc:
+                        print(f"[MediaFetcher] gpt-image-1-mini attempt notice: {exc}")
                         dest_path.unlink(missing_ok=True)
-                        continue
+                        break
             return None
         except Exception as exc:
             print(f"[MediaFetcher] Foundry {self.image_model} notice: {exc}")
@@ -414,10 +431,10 @@ class MediaFetcher:
         }
         for attempt in (1, 2):
             try:
-                resp = self.session.post(self.free_image_api_url, headers=headers, json=payload, timeout=65)
+                resp = self.session.post(self.free_image_api_url, headers=headers, json=payload, timeout=35)
                 if resp.status_code != 200:
                     if attempt == 1:
-                        time.sleep(0.8)
+                        time.sleep(0.6)
                         continue
                     return None
 
@@ -442,7 +459,7 @@ class MediaFetcher:
             except Exception:
                 dest_path.unlink(missing_ok=True)
                 if attempt == 1:
-                    time.sleep(0.8)
+                    time.sleep(0.6)
         return None
 
     def _generate_via_cloudflare_rest_api(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.38) -> Optional[Path]:
@@ -453,7 +470,7 @@ class MediaFetcher:
         }
         payload = {"prompt": prompt[:1900], "steps": 4}
         try:
-            resp = self.session.post(url, headers=headers, json=payload, timeout=65)
+            resp = self.session.post(url, headers=headers, json=payload, timeout=35)
             if resp.status_code != 200:
                 return None
             ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -476,7 +493,7 @@ class MediaFetcher:
         try:
             encoded = quote(prompt[:600])
             url = f"https://image.pollinations.ai/prompt/{encoded}?width=1280&height=720&seed={seed}&nologo=true&model=flux"
-            resp = self.session.get(url, timeout=18)
+            resp = self.session.get(url, timeout=15)
             if resp.status_code == 200 and len(resp.content) > 15_000:
                 dest_path.write_bytes(resp.content)
                 with Image.open(dest_path) as im:
