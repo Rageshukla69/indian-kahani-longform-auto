@@ -13,7 +13,7 @@ on:
       max_ai_images:
         description: 'Maximum AI images per story (default 20 using free Cloudflare Worker API)'
         required: false
-        default: '60'
+        default: '90'
       dry_run:
         description: 'Skip YouTube upload (true = render preview MP4 artifact only, false = publish to YouTube)'
         required: false
@@ -86,7 +86,7 @@ jobs:
           FOUNDRY_API_KEY: ${{ secrets.FOUNDRY_API_KEY }}
           FOUNDRY_ENDPOINT: ${{ secrets.FOUNDRY_ENDPOINT }}
           FOUNDRY_IMAGE_MODEL: ${{ secrets.FOUNDRY_IMAGE_MODEL || 'MAI-Image-2.6-Flash' }}
-          MAX_AI_IMAGES_PER_VIDEO: ${{ github.event.inputs.max_ai_images || vars.MAX_AI_IMAGES_PER_VIDEO || secrets.MAX_AI_IMAGES_PER_VIDEO || '60' }}
+          MAX_AI_IMAGES_PER_VIDEO: ${{ github.event.inputs.max_ai_images || vars.MAX_AI_IMAGES_PER_VIDEO || secrets.MAX_AI_IMAGES_PER_VIDEO || '90' }}
           FOUNDRY_TEXT_API_KEY: ${{ secrets.FOUNDRY_TEXT_API_KEY }}
           FOUNDRY_TEXT_ENDPOINT: ${{ secrets.FOUNDRY_TEXT_ENDPOINT }}
           FOUNDRY_TEXT_MODEL: ${{ secrets.FOUNDRY_TEXT_MODEL || 'gpt-6-luna' }}

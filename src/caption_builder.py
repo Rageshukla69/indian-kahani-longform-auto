@@ -1,11 +1,12 @@
 r"""
-Wide 16:9 Devanagari Hindi Storytelling Subtitle Builder (`src/caption_builder.py` — v2.0 Wide Cinema Edition):
-- Designed specifically for **Full-Screen 16:9 Widescreen (`1920x1080`) Storytelling**!
-- Fixes cramped narrow captions:
-  - Uses wide horizontal 16:9 lines (`max_words: 12`, `max_chars_per_clause: 78`, `max_single_line_chars: 64`) spanning smoothly across the widescreen lower third (`MarginL: 110, MarginR: 110, MarginV: 38`).
-  - Uses crisp 48pt **Noto Sans Devanagari** with thick dark text outline (`Outline: 4.2, Shadow: 2.2`, `BorderStyle: 1`) so the video needs ZERO ugly black box covering the bottom 20% of the screen!
-  - Uses pure Devanagari symbols (`✦`, `•`) instead of color emojis (`🎙️`, `🔔`) that render as broken `?` or `[]` tofu boxes in Linux FFmpeg `libass`.
-  - Highlights the active spoken word in **Warm Storytelling Gold (`#FFD700`)** (or **Soft Coral-Rose (`#FF99B6`)** when a female character speaks).
+High-Visibility 16:9 Devanagari Hindi Storytelling Subtitle Builder (`src/caption_builder.py` — v3.0 Pro Creator Edition):
+- Fixes small captions & speaker-tag overlap:
+  1. **Large, Bold 68pt Devanagari Typography (`Fontsize: 68`, `Outline: 5.5`, `Shadow: 3.0`)**:
+     Positioned at `MarginV: 64` (`Alignment: 2` bottom-center) with a semi-opaque dark shadow box so every Hindi word is effortlessly readable on both mobile phones and TVs!
+  2. **Zero Overlap Between Speaker Tag & Subtitles**:
+     Moves `SpeakerTag` (`✦ मगरमच्छ की पत्नी ✦`) to the **Top-Right corner (`Alignment: 9`, `MarginV: 38`)** so 2-line bottom captions NEVER collide with the speaker name!
+  3. **6–7 Words Per Clause (`max_words: 7`, `max_chars_per_clause: 46`)**:
+     Shows 1 or 2 punchy, large-print Hindi lines at a time with active-word **Warm Gold (`#FFD700`)** (or **Bright Rose-Pink (`#FF80B3`)** for female voices) + `108%` scale pop.
 """
 import re
 from pathlib import Path
@@ -18,6 +19,7 @@ LEADING_PUNCT_RE = re.compile(r"^([,.;:!?।॥]+)(.+)$")
 HINDI_EMPHASIS_WORDS = {
     "पंचतंत्र", "कहानी", "मित्रता", "बुद्धि", "चतुर", "धैर्य", "विश्वासघात", "सीख",
     "शिक्षा", "संकट", "राजा", "रानी", "राजकुमारी", "जंगल", "नदी", "अमृत", "सत्य", "धर्म", "न्याय",
+    "कलेजा", "मगरमच्छ", "बंदर", "रक्तमुख", "करालमुख", "जामुन", "प्राण", "छलांग",
 }
 
 
@@ -33,12 +35,7 @@ def _format_ass_time(seconds: float) -> str:
 
 
 def _clean_hindi_word(word: str) -> str:
-    """
-    Preserves all Devanagari characters, matras, chandrabindu, anusvara, visarga, halant, and purna viram (`।`),
-    stripping only ASS control braces/backslashes and stripping unsupported color emojis that cause `?` boxes.
-    """
     cleaned = word.replace("{", "").replace("}", "").replace("\\", "").strip()
-    # Remove supplementary-plane color emojis (U+1F000+) that render as tofu boxes in NotoSansDevanagari
     cleaned = re.sub(r"[\U00010000-\U0010ffff\uFE00-\uFE0F]", "", cleaned)
     cleaned = re.sub(r"\s+([,.;:!?।॥])", r"\1", cleaned)
     return cleaned.strip()
@@ -47,10 +44,13 @@ def _clean_hindi_word(word: str) -> str:
 def _get_storytelling_highlight_tag(word_str: str, speaker_gender: str = "male") -> str:
     bare = re.sub(r"[,.;:!?।॥\"'\(\)\[\]]", "", word_str).strip()
     if bare in HINDI_EMPHASIS_WORDS:
-        return r"{\c&H00BFFF&\fscx104\fscy104}"
+        # Vibrant Golden-Orange (#FFAA00 -> BGR &H00AAFF&) + 108% pop
+        return r"{\c&H00AAFF&\fscx108\fscy108}"
     if speaker_gender == "female":
-        return r"{\c&HB699FF&\fscx103\fscy103}"
-    return r"{\c&H00D7FF&\fscx103\fscy103}"
+        # Bright Lotus Pink-Gold (#FF99CC -> BGR &HCC99FF&) + 107% pop
+        return r"{\c&HCC99FF&\fscx107\fscy107}"
+    # Classic Bright YouTube Storytelling Yellow-Gold (#FFD700 -> BGR &H00D7FF&) + 107% pop
+    return r"{\c&H00D7FF&\fscx107\fscy107}"
 
 
 def _merge_punctuation_tokens(word_timings: List[WordTiming]) -> List[WordTiming]:
@@ -103,12 +103,12 @@ def _merge_punctuation_tokens(word_timings: List[WordTiming]) -> List[WordTiming
 
 def _group_into_storytelling_clauses(
     word_timings: List[WordTiming],
-    max_words: int = 11,
-    max_chars_per_clause: int = 72,
+    max_words: int = 7,
+    max_chars_per_clause: int = 44,
 ) -> List[List[WordTiming]]:
     """
-    Groups Hindi words into wide, comfortable 16:9 storytelling sentences/clauses (up to 11 words or 72 chars)
-    so captions stretch naturally across the widescreen bottom bar instead of bunching in a narrow vertical column!
+    Groups Hindi words into punchy, high-legibility 5–7 word storytelling phrases (`max_chars_per_clause: 44`)
+    so the 68pt font fits comfortably in 1 or 2 wide lines at the bottom of the 16:9 screen.
     """
     chunks: List[List[WordTiming]] = []
     i = 0
@@ -131,7 +131,7 @@ def _group_into_storytelling_clauses(
             char_len = projected
             i += 1
 
-            if candidate.endswith(("।", "॥", ".", "!", "?", ";", ":")) or (len(chunk) >= 7 and candidate.endswith(",")):
+            if candidate.endswith(("।", "॥", ".", "!", "?", ";", ":")) or (len(chunk) >= 4 and candidate.endswith(",")):
                 break
 
         if chunk:
@@ -143,11 +143,8 @@ def _group_into_storytelling_clauses(
 def _format_storytelling_clause(
     chunk: List[WordTiming],
     active_idx: int,
-    max_single_line_chars: int = 56,
+    max_single_line_chars: int = 28,
 ) -> str:
-    """
-    Formats the clause as a wide 1-line widescreen subtitle (up to 56 chars) or a balanced wide 2-line subtitle.
-    """
     plain_words = [_clean_hindi_word(wt.word) for wt in chunk]
     speaker_gender = chunk[active_idx].speaker_gender if active_idx < len(chunk) else "male"
 
@@ -160,12 +157,11 @@ def _format_storytelling_clause(
             styled_words.append(w_str)
 
     total_chars = sum(len(w) for w in plain_words) + max(0, len(plain_words) - 1)
-    prefix = r"{\fad(30,0)}" if active_idx == 0 else ""
+    prefix = r"{\fad(25,0)}" if active_idx == 0 else ""
 
-    if len(plain_words) <= 9 or total_chars <= max_single_line_chars:
+    if len(plain_words) <= 5 or total_chars <= max_single_line_chars:
         return prefix + " ".join(styled_words)
 
-    # Split into two wide balanced widescreen lines
     mid = len(plain_words) // 2
     line1 = " ".join(styled_words[:mid])
     line2 = " ".join(styled_words[mid:])
@@ -179,14 +175,15 @@ def generate_synced_ass_captions(
     font_name: str = "Noto Sans Devanagari",
 ) -> Path:
     """
-    Generates a 1920x1080 widescreen `.ass` subtitle file with wide, clean Devanagari storytelling captions
-    at the bottom of the 16:9 frame (`MarginV: 38`, `MarginL: 100`, `MarginR: 100`), `Spacing: 0`
-    (mandatory for unbroken Devanagari Shirorekha), and zero emoji tofu characters.
+    Generates a 1920x1080 widescreen `.ass` subtitle file with:
+    - Large, bold 68pt `StoryCaption` at `Alignment: 2, MarginV: 64` (bottom center, high visibility)
+    - Top-Left `ChapterBadge` (`Alignment: 7, MarginV: 36`)
+    - Top-Right `SpeakerTag` (`Alignment: 9, MarginV: 36`) so it NEVER overlaps with bottom captions!
     """
     output_ass.parent.mkdir(parents=True, exist_ok=True)
 
     header = f"""[Script Info]
-Title: Indian Hindi Kahani 16:9 Wide Cinema Subtitles (Devanagari Shaped)
+Title: Indian Hindi Kahani 16:9 High-Visibility Subtitles (v3.0 Devanagari)
 ScriptType: v4.00+
 PlayResX: 1920
 PlayResY: 1080
@@ -195,10 +192,10 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: StoryCaption,{font_name},46,&H00FFFFFF,&H0000D7FF,&H00080808,&HA0000000,-1,0,0,0,100,100,0.0,0,1,4.2,2.2,2,100,100,38,1
-Style: SpeakerTag,{font_name},28,&H0000D7FF,&H00FFFFFF,&H00080808,&HB40A0E17,-1,0,0,0,100,100,0.0,0,1,3.2,1.5,2,100,100,118,1
-Style: ChapterBadge,{font_name},28,&H0000D7FF,&H00FFFFFF,&H00101010,&HC80C1018,-1,0,0,0,100,100,0.0,0,3,10,0,7,48,48,36,1
-Style: SubscribeCTA,{font_name},30,&H00FFFFFF,&H0000D7FF,&H001414CC,&HE61010B0,-1,0,0,0,100,100,0.0,0,3,12,0,8,70,70,40,1
+Style: StoryCaption,{font_name},68,&H00FFFFFF,&H0000D7FF,&H00050505,&HB4000000,-1,0,0,0,100,100,0.0,0,1,5.5,3.2,2,90,90,64,1
+Style: SpeakerTag,{font_name},32,&H0000D7FF,&H00FFFFFF,&H00101010,&HC80A0E17,-1,0,0,0,100,100,0.0,0,3,10,0,9,48,48,36,1
+Style: ChapterBadge,{font_name},30,&H0000D7FF,&H00FFFFFF,&H00101010,&HC80C1018,-1,0,0,0,100,100,0.0,0,3,10,0,7,48,48,36,1
+Style: SubscribeCTA,{font_name},34,&H00FFFFFF,&H0000D7FF,&H001414CC,&HE61010B0,-1,0,0,0,100,100,0.0,0,3,12,0,8,70,70,40,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -221,7 +218,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 
             line_text = _format_storytelling_clause(chunk, active_idx)
             events.append(
-                f"Dialogue: 2,{_format_ass_time(ev_start)},{_format_ass_time(ev_end)},StoryCaption,,100,100,38,,{line_text}"
+                f"Dialogue: 2,{_format_ass_time(ev_start)},{_format_ass_time(ev_end)},StoryCaption,,90,90,64,,{line_text}"
             )
 
     last_badge = ""
@@ -232,13 +229,13 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         if s_end_val > total_end_sec:
             total_end_sec = s_end_val
 
-        # Show clean Hindi speaker label (without English parentheses or unsupported emoji glyphs) when a character speaks
+        # Top-Right Speaker Badge (Alignment=9) — Zero overlap with bottom StoryCaption!
         raw_speaker = _clean_hindi_word(str(scene.get("speaker_name") or ""))
         clean_speaker = re.sub(r"\s*\([^)]*\)", "", raw_speaker).strip()
         speaker_role = str(scene.get("speaker_role") or "narrator").lower()
         if clean_speaker and speaker_role != "narrator" and s_end_val > s_start:
             events.append(
-                f"Dialogue: 1,{_format_ass_time(s_start)},{_format_ass_time(s_end_val)},SpeakerTag,,100,100,118,,{{\\fad(80,80)}}✦ {clean_speaker} ✦"
+                f"Dialogue: 1,{_format_ass_time(s_start)},{_format_ass_time(s_end_val)},SpeakerTag,,48,48,36,,{{\\fad(80,80)}}  ✦ स्वर: {clean_speaker}  "
             )
 
         badge = _clean_hindi_word(str(scene.get("on_screen_callout") or ""))
@@ -246,7 +243,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             continue
         last_badge = badge
         b_start = s_start + 0.05
-        b_end = min(s_end_val, b_start + 3.2)
+        b_end = min(s_end_val, b_start + 3.5)
         if b_end > b_start:
             events.append(
                 f"Dialogue: 1,{_format_ass_time(b_start)},{_format_ass_time(b_end)},ChapterBadge,,48,48,36,,{{\\fad(120,160)}}  ✦ {badge}  "
@@ -260,5 +257,5 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         )
 
     output_ass.write_text(header + "\n".join(events) + "\n", encoding="utf-8")
-    print(f"[CaptionBuilder] Generated {len(events)} Wide 16:9 Devanagari subtitle events -> {output_ass}")
+    print(f"[CaptionBuilder] Generated {len(events)} High-Visibility 68pt Devanagari subtitle events -> {output_ass}")
     return output_ass

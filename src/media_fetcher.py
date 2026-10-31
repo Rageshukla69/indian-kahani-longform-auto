@@ -1,24 +1,21 @@
 """
-Scene-Synced Multi-Shot Photorealistic 16:9 Free AI Image Generator (`src/media_fetcher.py` — v2.0 Full-Bleed 16:9 Edition):
-1. Generates **2 Distinct Photorealistic 16:9 Images per Scene** (`Shot A: Wide Establishing` + `Shot B: Close-Up/Action`)
-   for scenes >= 7.0 seconds — producing **30 to 50 free AI images per story** (since Cloudflare Workers AI gives ~173 free
-   FLUX images/day and you upload 2 stories/day)!
-2. Strictly enforces **Photorealistic 8K Live-Action Cinema** prompts (stripping any cartoon/2D illustration terms).
-3. **Full-Bleed 16:9 Widescreen Conversion (`_save_as_full_bleed_16x9`)**:
-   - Because `@cf/black-forest-labs/flux-1-schnell` natively returns `1024x1024` (1:1) images, saving them raw caused pillarboxed
-     sidebars! Now `_save_as_full_bleed_16x9` automatically scales and smart-crops every generated AI image into a true edge-to-edge
-     `1920x1080` (`16:9`) widescreen cinema frame (`aspect = 1.7778`) with **ZERO side bars**!
+Scene-Synced Multi-Shot Character-Consistent 16:9 Free AI Image Generator (`src/media_fetcher.py` — v3.0 66-84 Shots Edition):
+1. Generates **3 to 4 Distinct Photorealistic 16:9 Images per Scene** (`shot_prompts`: Shot 1 Opening, Shot 2 Mid-Action, Shot 3 Climax/Reaction)
+   so a 22-scene (6.5-minute) story has **66 to 84 unique AI images** (a fresh image every ~4.5 to 5.5 seconds!).
+2. Includes a 2-attempt retry with a brief pause on Cloudflare Worker (`FREE_IMAGE_API_URL`) calls so burst requests never drop Shot 2 or Shot 3.
+3. Locks character consistency across all shots via the story's `character_bible` and converts every output to full-bleed `1920x1080` (`16:9`).
 """
 import base64
 import hashlib
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, urlparse
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+from PIL import Image, ImageEnhance
 import requests
 
 try:
@@ -27,8 +24,8 @@ except ImportError:
     from src.archive_media import ArchiveMediaFinder, rank_candidates
 
 USER_AGENT = (
-    "IndianKahaniLongformBot/2.0 "
-    "(https://github.com/saurav-z/free-image-generation-api; PhotorealisticPipeline/2.0)"
+    "IndianKahaniLongformBot/3.0 "
+    "(https://github.com/saurav-z/free-image-generation-api; CharacterConsistentPipeline/3.0)"
 )
 
 PHOTOREALISTIC_ENFORCER = (
@@ -60,7 +57,6 @@ class MediaFetcher:
         self.media_cache_dir = Path(os.getenv("MEDIA_CACHE_DIR", ".cache/media"))
         self.media_cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # 1. Primary: saurav-z/free-image-generation-api Cloudflare Worker URL & Key
         self.free_image_api_url = (
             os.getenv("FREE_IMAGE_API_URL")
             or os.getenv("CLOUDFLARE_WORKER_URL")
@@ -76,11 +72,9 @@ class MediaFetcher:
             or "@cf/black-forest-labs/flux-1-schnell"
         ).strip()
 
-        # 2. Secondary: Direct Cloudflare Account ID & Token
         self.cf_account_id = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip()
         self.cf_api_token = os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
 
-        # 3. Optional Foundry endpoint
         self.foundry_endpoint = (
             os.getenv("FOUNDRY_ENDPOINT")
             or os.getenv("FOUNDRY_TEXT_ENDPOINT")
@@ -95,14 +89,17 @@ class MediaFetcher:
             os.getenv("FOUNDRY_IMAGE_MODEL") or "MAI-Image-2.6-Flash"
         ).strip()
 
-        # Default cap is 60 AI images per video (2 stories/day x ~40 images = 80 images/day, well within 173/day free quota!)
+        # Default cap is 90 AI images per video (22 scenes x 3-4 shots = 66-88 images per 6.5-minute video)
         raw_max_ai = os.getenv("MAX_AI_IMAGES_PER_VIDEO") or os.getenv("MAX_AI_IMAGES_PER_SHORT")
         if raw_max_ai is None or str(raw_max_ai).strip() == "":
-            raw_max_ai = "60"
+            raw_max_ai = "90"
         try:
             self.max_ai_images = max(0, int(str(raw_max_ai).strip()))
         except (TypeError, ValueError):
-            self.max_ai_images = 60
+            self.max_ai_images = 90
+        # If workflow passed an old low default like 20, automatically raise it to at least 75 when using the free Cloudflare Worker
+        if self.free_image_api_url and 0 < self.max_ai_images < 66:
+            self.max_ai_images = 80
 
         self.free_worker_images_used = 0
         self.ai_images_used = 0
@@ -127,11 +124,6 @@ class MediaFetcher:
 
     @staticmethod
     def _save_as_full_bleed_16x9(img: Image.Image, dest_path: Path, vertical_anchor: float = 0.38) -> Path:
-        """
-        Converts ANY generated image (including 1024x1024 square outputs from Flux-1-Schnell)
-        into a true full-bleed `1920x1080` (16:9) widescreen frame with ZERO side pillarboxes!
-        Uses `vertical_anchor` (0.35 for Shot A, 0.48 for Shot B) to preserve subjects cleanly.
-        """
         target_w, target_h = 1920, 1080
         rgb = img.convert("RGB")
         w, h = rgb.size
@@ -180,13 +172,16 @@ class MediaFetcher:
             p,
             flags=re.IGNORECASE,
         )
-        return f"{p}{PHOTOREALISTIC_ENFORCER}"
+        if "not cartoon" not in p.lower():
+            p = f"{p}{PHOTOREALISTIC_ENFORCER}"
+        return p
 
     def _generate_single_16x9_image(self, prompt: str, dest_path: Path, scene: dict, scene_id: int, shot_idx: int = 1) -> Tuple[Path, str]:
         can_use_ai = self.ai_images_used < self.max_ai_images
-        anchor = 0.34 if shot_idx == 1 else 0.46
+        anchors = (0.32, 0.42, 0.50, 0.36)
+        anchor = anchors[(shot_idx - 1) % len(anchors)]
 
-        # 1. Try saurav-z/free-image-generation-api Cloudflare Worker
+        # 1. Try saurav-z/free-image-generation-api Cloudflare Worker (with 2-attempt retry)
         if can_use_ai and self.free_image_api_url:
             saved = self._generate_via_free_cloudflare_worker(prompt, dest_path, vertical_anchor=anchor)
             if saved:
@@ -218,41 +213,49 @@ class MediaFetcher:
                 return saved, "FREE AI 16:9 (Flux Widescreen)"
 
         # 5. Offline CI Fallback: Full-bleed 1920x1080 procedural cinema landscape
-        self._create_indian_storybook_illustration(dest_path, scene=scene, topic=self.topic, scene_id=scene_id + shot_idx)
+        self._create_indian_storybook_illustration(dest_path, scene=scene, topic=self.topic, scene_id=scene_id * 3 + shot_idx)
         self.reframed_cuts_used += 1
         return dest_path, "16:9 CINEMA PLATE"
 
     def fetch_scene_asset(self, scene: dict, assets_dir: Path) -> Tuple[Path, str]:
         """
-        Generates 1 or 2 full-bleed `1920x1080` (16:9) photorealistic images for `scene`:
-        - Shot A (`scene_XX_shot1.jpg`): Wide Establishing 16:9 Photorealistic Shot
-        - Shot B (`scene_XX_shot2.jpg`): Mid-Scene Action/Close-Up 16:9 Photorealistic Shot (generated whenever `duration_sec >= 6.5` or `image_prompt_b` is present and AI budget remains)
-        Stores `scene["asset_paths"] = [str(shot1), str(shot2)]` so `VideoComposer` cuts to a fresh image every ~6 seconds!
+        Generates **3 to 4 distinct full-bleed `1920x1080` (16:9) photorealistic images per scene**
+        (one image every ~4.5 to 5.5 seconds of narration, yielding **66 to 84 images** across a 22-scene story!).
         """
         assets_dir.mkdir(parents=True, exist_ok=True)
         scene_id = int(scene.get("scene_id", 1))
         narration = str(scene.get("narration", "")).strip()
         subject = str(scene.get("visual_subject") or self.topic).strip()
-        dur = float(scene.get("duration_sec", 9.0) or 9.0)
+        dur = float(scene.get("duration_sec", 15.0) or 15.0)
 
-        p1 = self._clean_photorealistic_prompt(str(scene.get("image_prompt") or subject), subject)
-        shot1_dest = assets_dir / f"scene_{scene_id:02d}_shot1.jpg"
-        saved1, kind1 = self._generate_single_16x9_image(p1, shot1_dest, scene, scene_id, shot_idx=1)
+        # Target 1 fresh AI image every ~4.8 seconds (minimum 3 shots per normal scene, up to 4 for long scenes)
+        desired_shots = 4 if dur >= 18.5 else (3 if dur >= 9.0 else 2)
 
-        asset_paths = [str(saved1)]
-        kinds = [kind1]
-
-        # Generate a second distinct photorealistic 16:9 image for this scene if duration >= 6.0s
-        raw_p2 = str(scene.get("image_prompt_b") or "").strip()
-        if (dur >= 6.0 or raw_p2) and self.ai_images_used < self.max_ai_images:
-            p2 = self._clean_photorealistic_prompt(
-                raw_p2 or f"Close-up dramatic camera angle of {subject}, expressive photorealistic detail",
-                subject,
+        raw_shot_prompts = list(scene.get("shot_prompts") or [])
+        if not raw_shot_prompts:
+            raw_shot_prompts = [
+                str(scene.get("image_prompt") or f"Wide establishing shot of {subject}"),
+                str(scene.get("image_prompt_b") or f"Medium action shot of {subject}"),
+                str(scene.get("image_prompt_c") or f"Close-up reaction shot of {subject}"),
+            ]
+        while len(raw_shot_prompts) < desired_shots:
+            raw_shot_prompts.append(
+                f"Dramatic alternate cinema angle of {subject}, expressive photorealistic detail, shot {len(raw_shot_prompts) + 1}"
             )
-            shot2_dest = assets_dir / f"scene_{scene_id:02d}_shot2.jpg"
-            saved2, kind2 = self._generate_single_16x9_image(p2, shot2_dest, scene, scene_id, shot_idx=2)
-            asset_paths.append(str(saved2))
-            kinds.append(kind2)
+
+        asset_paths: List[str] = []
+        kinds: List[str] = []
+
+        for s_idx in range(1, desired_shots + 1):
+            if s_idx > 1 and self.ai_images_used >= self.max_ai_images:
+                break
+            prompt_str = self._clean_photorealistic_prompt(raw_shot_prompts[s_idx - 1], subject)
+            shot_dest = assets_dir / f"scene_{scene_id:02d}_shot{s_idx}.jpg"
+            saved_p, kind_str = self._generate_single_16x9_image(
+                prompt_str, shot_dest, scene, scene_id=scene_id, shot_idx=s_idx
+            )
+            asset_paths.append(str(saved_p))
+            kinds.append(kind_str)
 
         scene["asset_paths"] = asset_paths
         self.scene_audit_log.append({
@@ -263,7 +266,7 @@ class MediaFetcher:
             "narration": narration,
             "source_url": "https://github.com/saurav-z/free-image-generation-api",
         })
-        return saved1, "image"
+        return Path(asset_paths[0]), "image"
 
     def _generate_via_free_cloudflare_worker(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.38) -> Optional[Path]:
         headers = {"Content-Type": "application/json"}
@@ -278,34 +281,40 @@ class MediaFetcher:
             "height": 768,
             "num_steps": 4,
         }
-        try:
-            resp = self.session.post(self.free_image_api_url, headers=headers, json=payload, timeout=65)
-            if resp.status_code != 200:
-                print(f"[MediaFetcher] Cloudflare Worker HTTP {resp.status_code}: {resp.text[:200]}")
-                return None
-
-            ctype = (resp.headers.get("Content-Type") or "").lower()
-            if "application/json" in ctype or resp.content[:1] == b"{":
-                data = resp.json()
-                b64 = data.get("image") or (data.get("result") or {}).get("image")
-                if not b64:
+        for attempt in (1, 2):
+            try:
+                resp = self.session.post(self.free_image_api_url, headers=headers, json=payload, timeout=65)
+                if resp.status_code != 200:
+                    print(f"[MediaFetcher] Cloudflare Worker HTTP {resp.status_code} (attempt {attempt}): {resp.text[:160]}")
+                    if attempt == 1:
+                        time.sleep(0.8)
+                        continue
                     return None
-                raw_bytes = base64.b64decode(b64)
-            else:
-                raw_bytes = resp.content
 
-            dest_path.write_bytes(raw_bytes)
-            with Image.open(dest_path) as im:
-                rgb = im.convert("RGB")
-                if not self._is_valid_photographic_image(rgb):
-                    dest_path.unlink(missing_ok=True)
-                    return None
-                self._save_as_full_bleed_16x9(rgb, dest_path, vertical_anchor=vertical_anchor)
-            return dest_path
-        except Exception as exc:
-            print(f"[MediaFetcher] Free Image Worker notice: {exc}")
-            dest_path.unlink(missing_ok=True)
-            return None
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if "application/json" in ctype or resp.content[:1] == b"{":
+                    data = resp.json()
+                    b64 = data.get("image") or (data.get("result") or {}).get("image")
+                    if not b64:
+                        return None
+                    raw_bytes = base64.b64decode(b64)
+                else:
+                    raw_bytes = resp.content
+
+                dest_path.write_bytes(raw_bytes)
+                with Image.open(dest_path) as im:
+                    rgb = im.convert("RGB")
+                    if not self._is_valid_photographic_image(rgb):
+                        dest_path.unlink(missing_ok=True)
+                        return None
+                    self._save_as_full_bleed_16x9(rgb, dest_path, vertical_anchor=vertical_anchor)
+                return dest_path
+            except Exception as exc:
+                print(f"[MediaFetcher] Free Image Worker notice (attempt {attempt}): {exc}")
+                dest_path.unlink(missing_ok=True)
+                if attempt == 1:
+                    time.sleep(0.8)
+        return None
 
     def _generate_via_cloudflare_rest_api(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.38) -> Optional[Path]:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.cf_account_id}/ai/run/{self.free_image_model}"
@@ -403,9 +412,7 @@ class MediaFetcher:
         topic: str = "पंचतंत्र की कहानी",
         scene_id: int = 1,
     ):
-        """Renders a full-bleed 1920x1080 (16:9) atmospheric cinema landscape for offline test runs."""
         w, h = 1920, 1080
-        scene = scene or {}
         yy, xx = np.mgrid[0:h, 0:w]
         ty = yy.astype(np.float32) / max(1, h - 1)
         tx = xx.astype(np.float32) / max(1, w - 1)

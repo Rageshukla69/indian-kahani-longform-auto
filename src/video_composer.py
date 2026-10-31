@@ -1,11 +1,11 @@
 """
-Full-Bleed 16:9 Widescreen Long-Form Hindi Storytelling Video Composer (`src/video_composer.py` — v2.0 Full-Screen Edition):
-- Guarantees **100% Edge-to-Edge Full-Screen `1920x1080` (`16:9`) Visuals** on every single frame — NEVER adds blurred side pillarboxes!
-- Supports **Multi-Shot Visual Pacing per Scene** (`scene["asset_paths"]`): if a scene has 2 generated photorealistic AI images
-  (`Shot A` + `Shot B`), renders each image for half the scene duration with distinct camera motion (`smooth_push_in` -> `cinema_pan_right`)
-  so the viewer sees a fresh 16:9 visual every 5–7 seconds!
-- Removes the dark 20% bottom overlay box so 100% of the 16:9 image stays bright and unobstructed while wide outlined Devanagari
-  subtitles sit cleanly at the bottom edge.
+Full-Bleed 16:9 Widescreen Long-Form Hindi Storytelling Video Composer (`src/video_composer.py` — v3.0 66-84 Shots & Custom BGM Priority Edition):
+1. **Always Uses Your Uploaded Repo BGM (`assets/bgm/Parallel Relax AR.mp3`) First**:
+   `_select_bgm_track()` prioritizes `assets/bgm/` before ever falling back to `assets/sfx/`.
+2. **Renders All 3–4 Sub-Shots per Scene (`scene["asset_paths"]`)**:
+   Divides each scene's duration evenly across its 3–4 generated 16:9 images (`seg_XX_shot1.mp4`, `seg_XX_shot2.mp4`, `seg_XX_shot3.mp4`)
+   with alternating cinema camera motions so the viewer sees **66 to 84 unique scene-matched images** across a 6-minute story!
+3. **Full-Bleed 1920x1080 (`16:9`) Widescreen** with zero sidebars and high-visibility 68pt Devanagari subtitles.
 """
 import os
 import random
@@ -30,9 +30,9 @@ class VideoComposer:
 
     def __init__(self):
         try:
-            self.bg_music_vol = float(os.getenv("BG_MUSIC_VOLUME", "0.15"))
+            self.bg_music_vol = float(os.getenv("BG_MUSIC_VOLUME", "0.18"))
         except ValueError:
-            self.bg_music_vol = 0.15
+            self.bg_music_vol = 0.18
 
     @staticmethod
     def _run_ffmpeg(cmd: List[str], step_name: str):
@@ -42,11 +42,6 @@ class VideoComposer:
 
     @classmethod
     def _prepare_widescreen_plate(cls, asset_path: Path, out_clean_path: Path, vertical_anchor: float = 0.38) -> float:
-        """
-        Always produces a true full-bleed `1920x1080` (16:9) widescreen image by scaling to cover
-        the full `1920x1080` canvas (`max(WIDTH/w, HEIGHT/h)`) and center/smart-cropping.
-        ZERO side pillarboxes ever!
-        """
         with Image.open(asset_path) as im:
             rgb = im.convert("RGB")
             w, h = rgb.size
@@ -80,46 +75,46 @@ class VideoComposer:
 
         segment_files: List[Path] = []
         total_duration = sum(max(1.0, float(s.get("duration_sec", 3.5))) for s in scenes)
+        effects_cycle = ["smooth_push_in", "cinema_pan_right", "smooth_pull_out", "cinema_pan_left"]
+        anchors_cycle = [0.34, 0.42, 0.48, 0.38]
 
         for idx, scene in enumerate(scenes):
             scene_id = int(scene.get("scene_id", idx + 1))
             dur = max(1.0, float(scene["duration_sec"]))
             asset_type = scene.get("asset_type", "image")
-            effect = scene.get("effect", "smooth_push_in")
 
             raw_paths = scene.get("asset_paths") or [scene["asset_path"]]
-            shot_paths = [Path(p) for p in raw_paths if p]
+            shot_paths = [Path(p) for p in raw_paths if p and Path(p).exists()]
+            if not shot_paths:
+                shot_paths = [Path(scene["asset_path"])]
 
-            if asset_type == "image" and len(shot_paths) >= 2 and dur >= 4.0:
-                # Render 2 distinct full-bleed 16:9 AI images for this scene
-                dur_a = round(dur * 0.50, 3)
-                dur_b = round(dur - dur_a, 3)
+            if asset_type == "image" and len(shot_paths) >= 2:
+                n_shots = len(shot_paths)
+                base_shot_dur = round(dur / n_shots, 3)
+                remaining = dur
 
-                clean_a = temp_dir / f"clean_{scene_id:02d}_a.jpg"
-                clean_b = temp_dir / f"clean_{scene_id:02d}_b.jpg"
-                self._prepare_widescreen_plate(shot_paths[0], clean_a, vertical_anchor=0.35)
-                self._prepare_widescreen_plate(shot_paths[1], clean_b, vertical_anchor=0.45)
+                for s_i, sp in enumerate(shot_paths):
+                    shot_dur = round(remaining, 3) if s_i == n_shots - 1 else base_shot_dur
+                    remaining -= shot_dur
+                    shot_dur = max(0.8, shot_dur)
 
-                seg_a = temp_dir / f"seg_{scene_id:02d}_a.mp4"
-                seg_b = temp_dir / f"seg_{scene_id:02d}_b.mp4"
-
-                self._render_scene_segment(
-                    asset_path=clean_a,
-                    asset_type="prepared_image",
-                    duration=dur_a,
-                    effect=effect,
-                    out_path=seg_a,
-                    cam_mode=(idx * 2) % 4,
-                )
-                self._render_scene_segment(
-                    asset_path=clean_b,
-                    asset_type="prepared_image",
-                    duration=dur_b,
-                    effect="cinema_pan_right" if effect == "smooth_push_in" else "smooth_pull_out",
-                    out_path=seg_b,
-                    cam_mode=(idx * 2 + 1) % 4,
-                )
-                segment_files.extend([seg_a, seg_b])
+                    clean_shot = temp_dir / f"clean_{scene_id:02d}_s{s_i + 1}.jpg"
+                    self._prepare_widescreen_plate(
+                        sp,
+                        clean_shot,
+                        vertical_anchor=anchors_cycle[(idx + s_i) % len(anchors_cycle)],
+                    )
+                    seg_shot = temp_dir / f"seg_{scene_id:02d}_s{s_i + 1}.mp4"
+                    cam_idx = (idx * 3 + s_i) % 4
+                    self._render_scene_segment(
+                        asset_path=clean_shot,
+                        asset_type="prepared_image",
+                        duration=shot_dur,
+                        effect=effects_cycle[cam_idx],
+                        out_path=seg_shot,
+                        cam_mode=cam_idx,
+                    )
+                    segment_files.append(seg_shot)
             else:
                 clean_img = temp_dir / f"clean_{scene_id:02d}.jpg"
                 if asset_type == "image":
@@ -132,7 +127,7 @@ class VideoComposer:
                     asset_path=clean_img,
                     asset_type="prepared_image" if asset_type == "image" else "video",
                     duration=dur,
-                    effect=effect,
+                    effect=scene.get("effect", "smooth_push_in"),
                     out_path=seg,
                     cam_mode=idx % 4,
                 )
@@ -246,13 +241,12 @@ class VideoComposer:
                 x_expr = "iw/2-(iw/zoom/2)"
                 y_expr = "ih/2-(ih/zoom/2)"
 
-            # Full-screen unobstructed 16:9 image with subtle cinema vignette and smooth cross-fade
             vf = (
                 f"scale={self.SUBPIXEL_W}:{self.SUBPIXEL_H}:flags=bilinear,"
                 f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':"
                 f"d={frames}:s={self.WIDTH}x{self.HEIGHT}:fps={self.FPS},"
                 f"vignette=angle='PI/8',"
-                f"fade=t=in:st=0:d=0.22,"
+                f"fade=t=in:st=0:d=0.18,"
                 f"setsar=1,format=yuv420p"
             )
             cmd = [
@@ -282,7 +276,7 @@ class VideoComposer:
                 f"[0:v]scale={self.WIDTH}:{self.HEIGHT}:force_original_aspect_ratio=increase,"
                 f"crop={self.WIDTH}:{self.HEIGHT},"
                 f"fps={self.FPS},"
-                f"fade=t=in:st=0:d=0.22,"
+                f"fade=t=in:st=0:d=0.18,"
                 f"setsar=1,format=yuv420p[vout]"
             )
             cmd = [
@@ -314,6 +308,12 @@ class VideoComposer:
         self._run_ffmpeg(cmd, f"16:9 scene segment {out_path.name}")
 
     def _select_bgm_track(self, temp_dir: Path) -> Path:
+        """
+        PRIORITY ORDER:
+        1. Custom `BGM_URL` secret if explicitly provided
+        2. Your uploaded audio files inside `assets/bgm/` (e.g. `Parallel Relax AR.mp3`) — ALWAYS preferred!
+        3. Fallback synthesized tracks in `assets/sfx/` only if `assets/bgm/` is empty.
+        """
         bgm_url = os.getenv("BGM_URL", "").strip()
         if bgm_url:
             try:
@@ -321,9 +321,21 @@ class VideoComposer:
                 resp.raise_for_status()
                 custom_dl = temp_dir / "custom_bgm.mp3"
                 custom_dl.write_bytes(resp.content)
+                print(f"[VideoComposer] Using custom BGM from BGM_URL -> {custom_dl}")
                 return custom_dl
             except Exception:
                 pass
+
+        bgm_dir = Path("assets/bgm")
+        if bgm_dir.exists():
+            custom_tracks = sorted([
+                p for p in bgm_dir.iterdir()
+                if p.suffix.lower() in (".mp3", ".wav", ".ogg", ".m4a") and p.stat().st_size > 10_000
+            ])
+            if custom_tracks:
+                chosen = custom_tracks[0]
+                print(f"[VideoComposer] Using uploaded repository BGM track: {chosen}")
+                return chosen
 
         sfx_dir = Path("assets/sfx")
         for candidate in ("kahani_bgm.wav", "interstellar_bgm.wav", "ambient_bed.wav"):
@@ -331,16 +343,7 @@ class VideoComposer:
             if p.exists():
                 return p
 
-        bgm_dir = Path("assets/bgm")
-        if bgm_dir.exists():
-            custom_tracks = [
-                p for p in bgm_dir.iterdir()
-                if p.suffix.lower() in (".mp3", ".wav", ".ogg", ".m4a") and p.stat().st_size > 10_000
-            ]
-            if custom_tracks:
-                return random.choice(custom_tracks)
-
-        raise RuntimeError("No BGM track found in assets/sfx/ or assets/bgm/.")
+        raise RuntimeError("No BGM track found in assets/bgm/ or assets/sfx/.")
 
     def _build_master_audio_mix(
         self,
@@ -358,7 +361,7 @@ class VideoComposer:
             "[0:a]acompressor=threshold=-18dB:ratio=2.5:attack=12:release=160:makeup=3.0,volume=1.35,asplit=2[vo_main][vo_sc];"
             f"[1:a]volume={self.bg_music_vol:.2f}[bgm_raw];"
             "[bgm_raw][vo_sc]sidechaincompress=threshold=0.025:ratio=4.0:attack=25:release=320[bgm_ducked];"
-            "[2:a]volume=0.30[sfx_track];"
+            "[2:a]volume=0.22[sfx_track];"
             "[vo_main][bgm_ducked][sfx_track]amix=inputs=3:duration=first:dropout_transition=2:normalize=0,"
             "alimiter=limit=0.95:level=disabled[aout]"
         )
@@ -383,4 +386,4 @@ class VideoComposer:
             "2",
             str(out_wav),
         ]
-        self._run_ffmpeg(cmd, "broadcast -14 LUFS Hindi voiceover + sidechain BGM + transition SFX mix")
+        self._run_ffmpeg(cmd, "broadcast -14 LUFS Hindi voiceover + uploaded repo BGM + transition SFX mix")
