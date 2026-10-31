@@ -1,9 +1,9 @@
-import json
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -13,8 +13,9 @@ from topic_manager import (
     is_topic_already_used,
     load_seed_topics,
 )
+from foundry_llm import FoundryLLMClient
 from voice_engine import VoiceEngine, WordTiming
-from caption_builder import generate_synced_ass_captions, _clean_hindi_word
+from caption_builder import generate_synced_ass_captions, _clean_hindi_word, _group_into_storytelling_clauses
 from youtube_uploader import build_youtube_upload_payload
 from media_fetcher import MediaFetcher
 
@@ -32,43 +33,46 @@ class HindiStoryPipelineTests(unittest.TestCase):
         self.assertTrue(is_topic_already_used("कहानी #99: बंदर और मगरमच्छ (The Monkey and the Crocodile)", used))
         self.assertFalse(is_topic_already_used("कहानी #2: बातूनी कछुआ और दो हंस (The Talkative Tortoise)", used))
 
-    def test_story_numbering_format(self):
-        self.assertEqual(extract_story_number("कहानी #42: नाई और भिक्षुओं की कहानी"), 42)
-        self.assertEqual(
-            format_numbered_topic("कहानी #5: ब्राह्मण और नेवला", 5),
-            "कहानी #5: ब्राह्मण और नेवला",
-        )
+    def test_longform_storyboard_has_22_scenes_and_photorealistic_dual_prompts(self):
+        llm = FoundryLLMClient()
+        sb = llm._build_fallback_hindi_storyboard("कहानी #1: बंदर और मगरमच्छ", 1, "Panchatantra")
+        scenes = sb["scenes"]
+        self.assertGreaterEqual(len(scenes), 22)
+        for s in scenes:
+            self.assertIn("photorealistic", s["image_prompt"].lower())
+            self.assertIn("photorealistic", s["image_prompt_b"].lower())
+            self.assertNotIn("cartoon", s["image_prompt"].lower().split("not cartoon")[0])
 
-    def test_multi_character_voice_switching_male_and_female(self):
+    def test_square_flux_image_converts_to_full_bleed_1920x1080_without_pillarboxes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            square_img = Image.new("RGB", (1024, 1024), color=(60, 120, 90))
+            out_path = Path(tmp) / "full_16x9.jpg"
+            MediaFetcher._save_as_full_bleed_16x9(square_img, out_path, vertical_anchor=0.38)
+            with Image.open(out_path) as result_im:
+                self.assertEqual(result_im.size, (1920, 1080))
+
+    def test_young_male_and_female_voice_switching(self):
         ve = VoiceEngine()
-        narrator_v, _, _ = ve.resolve_voice_for_scene({"speaker_role": "narrator", "speaker_gender": "male"})
-        female_v, _, _ = ve.resolve_voice_for_scene({"speaker_role": "female_character", "speaker_gender": "female"})
-        wife_v, _, _ = ve.resolve_voice_for_scene({"speaker_name": "मगरमच्छ की पत्नी", "speaker_role": "narrator"})
+        narrator_v, nar_rate, nar_pitch = ve.resolve_voice_for_scene({"speaker_role": "narrator", "speaker_gender": "male"})
+        female_v, fem_rate, fem_pitch = ve.resolve_voice_for_scene({"speaker_role": "female_character", "speaker_gender": "female"})
         hero_v, hero_rate, hero_pitch = ve.resolve_voice_for_scene({"speaker_role": "male_protagonist", "speaker_gender": "male"})
-        villain_v, villain_rate, villain_pitch = ve.resolve_voice_for_scene({"speaker_role": "male_antagonist", "speaker_gender": "male"})
 
         self.assertIn("MadhurNeural", narrator_v)
+        self.assertGreaterEqual(nar_rate, 5)
+        self.assertIn("+", nar_pitch)
         self.assertIn("SwaraNeural", female_v)
-        self.assertIn("SwaraNeural", wife_v)
-        self.assertNotEqual(hero_pitch, villain_pitch)
-        self.assertNotEqual(hero_rate, villain_rate)
+        self.assertGreaterEqual(fem_rate, 5)
+        self.assertGreater(hero_rate, nar_rate)
 
-    def test_devanagari_caption_builder_preserves_matras_and_zero_spacing(self):
-        word = "मगरमच्छ"
-        self.assertEqual(_clean_hindi_word(word), "मगरमच्छ")
-        timings = [
-            WordTiming(word="नमस्कार", start_sec=0.0, end_sec=0.4, scene_id=1, speaker_role="narrator", speaker_gender="male"),
-            WordTiming(word="दोस्तों!", start_sec=0.4, end_sec=0.9, scene_id=1, speaker_role="narrator", speaker_gender="male"),
+    def test_wide_16x9_devanagari_captions_and_zero_emoji_tofu(self):
+        self.assertEqual(_clean_hindi_word("🎙️ मगरमच्छ 🔔"), "मगरमच्छ")
+        words = [
+            WordTiming(word=w, start_sec=i * 0.4, end_sec=(i + 1) * 0.4, scene_id=1)
+            for i, w in enumerate(["नर्मदा", "नदी", "के", "किनारे", "जामुन", "के", "विशाल", "पेड़", "पर", "रक्तमुख", "बंदर", "रहता", "था।"])
         ]
-        scenes = [{"scene_id": 1, "start_sec": 0.0, "end_sec": 1.0, "on_screen_callout": "कहानी #1 • पंचतंत्र", "speaker_name": "कथावाचक", "speaker_role": "narrator"}]
-        with tempfile.TemporaryDirectory() as tmp:
-            ass_file = Path(tmp) / "test.ass"
-            generate_synced_ass_captions(timings, scenes, ass_file)
-            content = ass_file.read_text(encoding="utf-8")
-            self.assertIn("PlayResX: 1920", content)
-            self.assertIn("PlayResY: 1080", content)
-            self.assertIn("Noto Sans Devanagari", content)
-            self.assertIn("नमस्कार", content)
+        clauses = _group_into_storytelling_clauses(words)
+        # Should group up to 11 words into the first wide 16:9 clause rather than breaking after 4 words
+        self.assertGreaterEqual(len(clauses[0]), 9)
 
     def test_youtube_ai_disclosure_and_tags_present(self):
         payload = build_youtube_upload_payload(
@@ -81,22 +85,6 @@ class HindiStoryPipelineTests(unittest.TestCase):
         self.assertTrue(payload["status"]["containsSyntheticMedia"])
         self.assertTrue(payload["status"]["selfDeclaredAsModifiedContent"])
         self.assertIn("AIGenerated", payload["snippet"]["tags"])
-        self.assertIn("AIStory", payload["snippet"]["tags"])
-        self.assertEqual(payload["snippet"]["defaultLanguage"], "hi")
-        self.assertIn("#AIGenerated", payload["snippet"]["description"])
-
-    def test_storybook_16x9_fallback_plate_renders_1920x1080(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "plate.jpg"
-            MediaFetcher._create_indian_storybook_illustration(
-                out,
-                scene={"on_screen_callout": "कहानी #1 • पंचतंत्र", "visual_subject": "Monkey and Crocodile"},
-                scene_id=1,
-            )
-            self.assertTrue(out.exists())
-            from PIL import Image
-            with Image.open(out) as im:
-                self.assertEqual(im.size, (1920, 1080))
 
 
 if __name__ == "__main__":

@@ -1,11 +1,13 @@
 """
-Scene-Synced Free AI Image Generator & Multi-Archive Visual Resolver (`src/media_fetcher.py`):
-1. Primary Engine: **[saurav-z/free-image-generation-api](https://github.com/saurav-z/free-image-generation-api)**
-   - Calls your deployed Cloudflare Worker (`FREE_IMAGE_API_URL` + `FREE_IMAGE_API_KEY`) to generate custom **16:9 widescreen (`1344x768`)** AI storybook illustrations for EVERY scene at **$0.00 cost**!
-2. Direct Cloudflare Workers AI REST Fallback (`CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN`):
-   - Calls `@cf/black-forest-labs/flux-1-schnell` or `@cf/bytedance/stable-diffusion-xl-lightning` directly if you prefer not to deploy a Worker manually.
-3. Optional Microsoft Foundry Image Endpoint (`FOUNDRY_ENDPOINT` + `FOUNDRY_API_KEY`) or Free Pollinations FLUX 16:9 Fallback.
-4. Multi-Archive Indian Art & Wildlife Fallback (`ArchiveMediaFinder`) + Rich 1920x1080 Indian Storybook Canvas Renderer (with proper Devanagari typography) so a build NEVER fails even in offline CI tests!
+Scene-Synced Multi-Shot Photorealistic 16:9 Free AI Image Generator (`src/media_fetcher.py` — v2.0 Full-Bleed 16:9 Edition):
+1. Generates **2 Distinct Photorealistic 16:9 Images per Scene** (`Shot A: Wide Establishing` + `Shot B: Close-Up/Action`)
+   for scenes >= 7.0 seconds — producing **30 to 50 free AI images per story** (since Cloudflare Workers AI gives ~173 free
+   FLUX images/day and you upload 2 stories/day)!
+2. Strictly enforces **Photorealistic 8K Live-Action Cinema** prompts (stripping any cartoon/2D illustration terms).
+3. **Full-Bleed 16:9 Widescreen Conversion (`_save_as_full_bleed_16x9`)**:
+   - Because `@cf/black-forest-labs/flux-1-schnell` natively returns `1024x1024` (1:1) images, saving them raw caused pillarboxed
+     sidebars! Now `_save_as_full_bleed_16x9` automatically scales and smart-crops every generated AI image into a true edge-to-edge
+     `1920x1080` (`16:9`) widescreen cinema frame (`aspect = 1.7778`) with **ZERO side bars**!
 """
 import base64
 import hashlib
@@ -16,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import quote, urlparse
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 import requests
 
 try:
@@ -26,7 +28,13 @@ except ImportError:
 
 USER_AGENT = (
     "IndianKahaniLongformBot/2.0 "
-    "(https://github.com/saurav-z/free-image-generation-api; StorytellingPipeline/2.0)"
+    "(https://github.com/saurav-z/free-image-generation-api; PhotorealisticPipeline/2.0)"
+)
+
+PHOTOREALISTIC_ENFORCER = (
+    ", ultra-realistic 8k live-action cinema photography, shot on ARRI Alexa 65 with 35mm anamorphic lens, "
+    "photorealistic natural textures, dramatic golden-hour volumetric lighting, wide 16:9 horizontal composition, "
+    "National Geographic and epic Indian historical film realism, NOT cartoon, NOT 2D illustration, NOT comic, no text, no watermarks"
 )
 
 
@@ -87,14 +95,14 @@ class MediaFetcher:
             os.getenv("FOUNDRY_IMAGE_MODEL") or "MAI-Image-2.6-Flash"
         ).strip()
 
-        # For Hindi storytelling with free AI image generation, default cap is 20 scenes per video
+        # Default cap is 60 AI images per video (2 stories/day x ~40 images = 80 images/day, well within 173/day free quota!)
         raw_max_ai = os.getenv("MAX_AI_IMAGES_PER_VIDEO") or os.getenv("MAX_AI_IMAGES_PER_SHORT")
         if raw_max_ai is None or str(raw_max_ai).strip() == "":
-            raw_max_ai = "20"
+            raw_max_ai = "60"
         try:
             self.max_ai_images = max(0, int(str(raw_max_ai).strip()))
         except (TypeError, ValueError):
-            self.max_ai_images = 20
+            self.max_ai_images = 60
 
         self.free_worker_images_used = 0
         self.ai_images_used = 0
@@ -118,6 +126,31 @@ class MediaFetcher:
         return True
 
     @staticmethod
+    def _save_as_full_bleed_16x9(img: Image.Image, dest_path: Path, vertical_anchor: float = 0.38) -> Path:
+        """
+        Converts ANY generated image (including 1024x1024 square outputs from Flux-1-Schnell)
+        into a true full-bleed `1920x1080` (16:9) widescreen frame with ZERO side pillarboxes!
+        Uses `vertical_anchor` (0.35 for Shot A, 0.48 for Shot B) to preserve subjects cleanly.
+        """
+        target_w, target_h = 1920, 1080
+        rgb = img.convert("RGB")
+        w, h = rgb.size
+
+        scale = max(target_w / max(w, 1), target_h / max(h, 1))
+        new_w = max(target_w, int(round(w * scale)))
+        new_h = max(target_h, int(round(h * scale)))
+        resized = rgb.resize((new_w, new_h), Image.Resampling.LANCZOS)
+
+        left = (new_w - target_w) // 2
+        top = min(max(0, int((new_h - target_h) * vertical_anchor)), new_h - target_h)
+        cropped = resized.crop((left, top, left + target_w, top + target_h))
+
+        cropped = ImageEnhance.Contrast(cropped).enhance(1.04)
+        cropped = ImageEnhance.Sharpness(cropped).enhance(1.06)
+        cropped.save(dest_path, quality=95)
+        return dest_path
+
+    @staticmethod
     def _scene_terms(scene: Dict[str, Any]) -> Set[str]:
         stop = {
             "this", "that", "with", "from", "into", "over", "were", "have", "their", "about",
@@ -138,109 +171,101 @@ class MediaFetcher:
             return 0
         return sum(3 if term in str(candidate.get("title", "")).lower() else 1 for term in terms if term in text)
 
+    @staticmethod
+    def _clean_photorealistic_prompt(raw_prompt: str, subject: str) -> str:
+        p = (raw_prompt or subject).strip()
+        p = re.sub(
+            r"\b(cartoon|pixar|3d\s*animation|animated|storybook\s*illustration|illustration|amar\s*chitra\s*katha|comic|2d|drawing|sketch)\b",
+            "photorealistic live-action cinema",
+            p,
+            flags=re.IGNORECASE,
+        )
+        return f"{p}{PHOTOREALISTIC_ENFORCER}"
+
+    def _generate_single_16x9_image(self, prompt: str, dest_path: Path, scene: dict, scene_id: int, shot_idx: int = 1) -> Tuple[Path, str]:
+        can_use_ai = self.ai_images_used < self.max_ai_images
+        anchor = 0.34 if shot_idx == 1 else 0.46
+
+        # 1. Try saurav-z/free-image-generation-api Cloudflare Worker
+        if can_use_ai and self.free_image_api_url:
+            saved = self._generate_via_free_cloudflare_worker(prompt, dest_path, vertical_anchor=anchor)
+            if saved:
+                self.free_worker_images_used += 1
+                self.ai_images_used += 1
+                return saved, "FREE AI 16:9 (Cloudflare Worker)"
+
+        # 2. Try Direct Cloudflare Workers AI REST API
+        if can_use_ai and self.cf_account_id and self.cf_api_token:
+            saved = self._generate_via_cloudflare_rest_api(prompt, dest_path, vertical_anchor=anchor)
+            if saved:
+                self.free_worker_images_used += 1
+                self.ai_images_used += 1
+                return saved, "FREE AI 16:9 (Cloudflare Workers AI)"
+
+        # 3. Try Microsoft Foundry Image Endpoint
+        if can_use_ai and self.foundry_endpoint and self.foundry_key:
+            saved = self._generate_foundry_image(prompt, dest_path, vertical_anchor=anchor)
+            if saved:
+                self.ai_images_used += 1
+                return saved, f"AI 16:9 ({self.image_model})"
+
+        # 4. Try Free Pollinations 16:9 Image API
+        if can_use_ai and os.getenv("ALLOW_POLLINATIONS_FALLBACK", "true").lower() == "true":
+            saved = self._generate_via_pollinations_free(prompt, dest_path, seed=1000 + scene_id * 10 + shot_idx, vertical_anchor=anchor)
+            if saved:
+                self.free_worker_images_used += 1
+                self.ai_images_used += 1
+                return saved, "FREE AI 16:9 (Flux Widescreen)"
+
+        # 5. Offline CI Fallback: Full-bleed 1920x1080 procedural cinema landscape
+        self._create_indian_storybook_illustration(dest_path, scene=scene, topic=self.topic, scene_id=scene_id + shot_idx)
+        self.reframed_cuts_used += 1
+        return dest_path, "16:9 CINEMA PLATE"
+
     def fetch_scene_asset(self, scene: dict, assets_dir: Path) -> Tuple[Path, str]:
         """
-        Scene-Synced 16:9 Visual Pipeline:
-        1. Free AI Image Generation API (`saurav-z/free-image-generation-api` Cloudflare Worker or Direct Cloudflare Workers AI)
-        2. Optional Foundry AI Image Generation (`FOUNDRY_ENDPOINT`)
-        3. Free Pollinations FLUX 16:9 Illustration Generator (when internet is enabled and no keys are set)
-        4. Wikimedia Commons / Openverse Indian Art & Wildlife Search
-        5. Rich 1920x1080 Indian Storybook Illustrated Scene Plate (with Devanagari scene title & procedural landscape art)
+        Generates 1 or 2 full-bleed `1920x1080` (16:9) photorealistic images for `scene`:
+        - Shot A (`scene_XX_shot1.jpg`): Wide Establishing 16:9 Photorealistic Shot
+        - Shot B (`scene_XX_shot2.jpg`): Mid-Scene Action/Close-Up 16:9 Photorealistic Shot (generated whenever `duration_sec >= 6.5` or `image_prompt_b` is present and AI budget remains)
+        Stores `scene["asset_paths"] = [str(shot1), str(shot2)]` so `VideoComposer` cuts to a fresh image every ~6 seconds!
         """
         assets_dir.mkdir(parents=True, exist_ok=True)
         scene_id = int(scene.get("scene_id", 1))
         narration = str(scene.get("narration", "")).strip()
         subject = str(scene.get("visual_subject") or self.topic).strip()
-        raw_prompt = str(scene.get("image_prompt") or subject).strip()
-        styled_prompt = (
-            f"{raw_prompt}, warm cinematic Indian storybook illustration, Amar Chitra Katha and Pixar 3D lighting, "
-            "vibrant Indian heritage colors, 16:9 widescreen composition, clean composition, no text, no watermarks"
-        )
+        dur = float(scene.get("duration_sec", 9.0) or 9.0)
 
-        can_use_ai = self.ai_images_used < self.max_ai_images
-        ai_dest = assets_dir / f"scene_{scene_id:02d}_ai.jpg"
+        p1 = self._clean_photorealistic_prompt(str(scene.get("image_prompt") or subject), subject)
+        shot1_dest = assets_dir / f"scene_{scene_id:02d}_shot1.jpg"
+        saved1, kind1 = self._generate_single_16x9_image(p1, shot1_dest, scene, scene_id, shot_idx=1)
 
-        # 1. Try saurav-z/free-image-generation-api Cloudflare Worker
-        if can_use_ai and self.free_image_api_url:
-            saved = self._generate_via_free_cloudflare_worker(styled_prompt, ai_dest)
-            if saved:
-                self.free_worker_images_used += 1
-                self.ai_images_used += 1
-                self.scene_audit_log.append({
-                    "scene_id": scene_id,
-                    "kind": "FREE AI IMAGE (Cloudflare Worker)",
-                    "source": f"saurav-z/free-image-generation-api ({self.free_image_model})",
-                    "narration": narration,
-                    "source_url": "https://github.com/saurav-z/free-image-generation-api",
-                })
-                return saved, "image"
+        asset_paths = [str(saved1)]
+        kinds = [kind1]
 
-        # 2. Try Direct Cloudflare Workers AI REST API (if CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN set)
-        if can_use_ai and self.cf_account_id and self.cf_api_token:
-            saved = self._generate_via_cloudflare_rest_api(styled_prompt, ai_dest)
-            if saved:
-                self.free_worker_images_used += 1
-                self.ai_images_used += 1
-                self.scene_audit_log.append({
-                    "scene_id": scene_id,
-                    "kind": "FREE AI IMAGE (Cloudflare Workers AI)",
-                    "source": f"Cloudflare Workers AI ({self.free_image_model})",
-                    "narration": narration,
-                    "source_url": "https://developers.cloudflare.com/workers-ai/",
-                })
-                return saved, "image"
+        # Generate a second distinct photorealistic 16:9 image for this scene if duration >= 6.0s
+        raw_p2 = str(scene.get("image_prompt_b") or "").strip()
+        if (dur >= 6.0 or raw_p2) and self.ai_images_used < self.max_ai_images:
+            p2 = self._clean_photorealistic_prompt(
+                raw_p2 or f"Close-up dramatic camera angle of {subject}, expressive photorealistic detail",
+                subject,
+            )
+            shot2_dest = assets_dir / f"scene_{scene_id:02d}_shot2.jpg"
+            saved2, kind2 = self._generate_single_16x9_image(p2, shot2_dest, scene, scene_id, shot_idx=2)
+            asset_paths.append(str(saved2))
+            kinds.append(kind2)
 
-        # 3. Try Microsoft Foundry Image Endpoint (if configured)
-        if can_use_ai and self.foundry_endpoint and self.foundry_key:
-            saved = self._generate_foundry_image(styled_prompt, ai_dest)
-            if saved:
-                self.ai_images_used += 1
-                self.scene_audit_log.append({
-                    "scene_id": scene_id,
-                    "kind": f"AI IMAGE ({self.image_model})",
-                    "source": saved.name,
-                    "narration": narration,
-                    "source_url": "AI-generated illustration",
-                })
-                return saved, "image"
-
-        # 4. Try Free Pollinations 16:9 Image API if outbound network is available
-        if can_use_ai and os.getenv("ALLOW_POLLINATIONS_FALLBACK", "true").lower() == "true":
-            saved = self._generate_via_pollinations_free(styled_prompt, ai_dest, seed=100 + scene_id)
-            if saved:
-                self.free_worker_images_used += 1
-                self.ai_images_used += 1
-                self.scene_audit_log.append({
-                    "scene_id": scene_id,
-                    "kind": "FREE AI IMAGE (Flux 16:9)",
-                    "source": saved.name,
-                    "narration": narration,
-                    "source_url": "AI-generated 16:9 illustration",
-                })
-                return saved, "image"
-
-        # 5. Render Rich 1920x1080 Indian Storybook Illustrated Scene Plate (100% offline-safe, scene-specific palette & art)
-        storybook_path = assets_dir / f"scene_{scene_id:02d}_storybook.jpg"
-        self._create_indian_storybook_illustration(storybook_path, scene=scene, topic=self.topic, scene_id=scene_id)
-        self.reframed_cuts_used += 1
+        scene["asset_paths"] = asset_paths
         self.scene_audit_log.append({
             "scene_id": scene_id,
-            "kind": "STORYBOOK ILLUSTRATION PLATE",
-            "source": f"16:9 Indian Storybook Canvas (Scene {scene_id})",
+            "kind": f"{kinds[0]} ({len(asset_paths)} shots)",
+            "shots_count": len(asset_paths),
+            "source": ", ".join(Path(p).name for p in asset_paths),
             "narration": narration,
-            "source_url": "Locally rendered 16:9 storybook artwork",
-            "license": "Original generated artwork",
+            "source_url": "https://github.com/saurav-z/free-image-generation-api",
         })
-        return storybook_path, "image"
+        return saved1, "image"
 
-    def _generate_via_free_cloudflare_worker(self, prompt: str, dest_path: Path) -> Optional[Path]:
-        """
-        Calls the deployed `saurav-z/free-image-generation-api` Cloudflare Worker:
-        POST <FREE_IMAGE_API_URL>
-        Headers: Authorization: Bearer <FREE_IMAGE_API_KEY>, Content-Type: application/json
-        Body: {"prompt": prompt, "model": self.free_image_model, "width": 1344, "height": 768}
-        Handles both raw binary image responses (`image/jpeg`, `image/png`) and JSON `{"image": "<base64>"}`.
-        """
+    def _generate_via_free_cloudflare_worker(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.38) -> Optional[Path]:
         headers = {"Content-Type": "application/json"}
         if self.free_image_api_key:
             headers["Authorization"] = f"Bearer {self.free_image_api_key}"
@@ -254,7 +279,7 @@ class MediaFetcher:
             "num_steps": 4,
         }
         try:
-            resp = self.session.post(self.free_image_api_url, headers=headers, json=payload, timeout=60)
+            resp = self.session.post(self.free_image_api_url, headers=headers, json=payload, timeout=65)
             if resp.status_code != 200:
                 print(f"[MediaFetcher] Cloudflare Worker HTTP {resp.status_code}: {resp.text[:200]}")
                 return None
@@ -275,23 +300,22 @@ class MediaFetcher:
                 if not self._is_valid_photographic_image(rgb):
                     dest_path.unlink(missing_ok=True)
                     return None
-                rgb.save(dest_path, quality=95)
+                self._save_as_full_bleed_16x9(rgb, dest_path, vertical_anchor=vertical_anchor)
             return dest_path
         except Exception as exc:
             print(f"[MediaFetcher] Free Image Worker notice: {exc}")
             dest_path.unlink(missing_ok=True)
             return None
 
-    def _generate_via_cloudflare_rest_api(self, prompt: str, dest_path: Path) -> Optional[Path]:
-        """Direct Cloudflare Workers AI REST endpoint (`@cf/black-forest-labs/flux-1-schnell`)."""
+    def _generate_via_cloudflare_rest_api(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.38) -> Optional[Path]:
         url = f"https://api.cloudflare.com/client/v4/accounts/{self.cf_account_id}/ai/run/{self.free_image_model}"
         headers = {
             "Authorization": f"Bearer {self.cf_api_token}",
             "Content-Type": "application/json",
         }
-        payload = {"prompt": prompt[:1900], "num_steps": 4}
+        payload = {"prompt": prompt[:1900], "steps": 4}
         try:
-            resp = self.session.post(url, headers=headers, json=payload, timeout=60)
+            resp = self.session.post(url, headers=headers, json=payload, timeout=65)
             if resp.status_code != 200:
                 return None
             ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -304,14 +328,14 @@ class MediaFetcher:
             else:
                 dest_path.write_bytes(resp.content)
             with Image.open(dest_path) as im:
-                im.convert("RGB").save(dest_path, quality=95)
+                self._save_as_full_bleed_16x9(im.convert("RGB"), dest_path, vertical_anchor=vertical_anchor)
             return dest_path
         except Exception as exc:
             print(f"[MediaFetcher] Cloudflare REST AI notice: {exc}")
             dest_path.unlink(missing_ok=True)
             return None
 
-    def _generate_foundry_image(self, prompt: str, dest_path: Path) -> Optional[Path]:
+    def _generate_foundry_image(self, prompt: str, dest_path: Path, vertical_anchor: float = 0.38) -> Optional[Path]:
         try:
             parsed = urlparse(self.foundry_endpoint)
             if parsed.scheme and parsed.netloc:
@@ -348,13 +372,13 @@ class MediaFetcher:
                     else:
                         continue
                     with Image.open(dest_path) as im:
-                        im.convert("RGB").save(dest_path, quality=95)
+                        self._save_as_full_bleed_16x9(im.convert("RGB"), dest_path, vertical_anchor=vertical_anchor)
                     return dest_path
             return None
         except Exception:
             return None
 
-    def _generate_via_pollinations_free(self, prompt: str, dest_path: Path, seed: int = 42) -> Optional[Path]:
+    def _generate_via_pollinations_free(self, prompt: str, dest_path: Path, seed: int = 42, vertical_anchor: float = 0.38) -> Optional[Path]:
         try:
             encoded = quote(prompt[:600])
             url = f"https://image.pollinations.ai/prompt/{encoded}?width=1280&height=720&seed={seed}&nologo=true&model=flux"
@@ -364,7 +388,7 @@ class MediaFetcher:
                 with Image.open(dest_path) as im:
                     rgb = im.convert("RGB")
                     if self._is_valid_photographic_image(rgb):
-                        rgb.save(dest_path, quality=95)
+                        self._save_as_full_bleed_16x9(rgb, dest_path, vertical_anchor=vertical_anchor)
                         return dest_path
             dest_path.unlink(missing_ok=True)
             return None
@@ -379,11 +403,7 @@ class MediaFetcher:
         topic: str = "पंचतंत्र की कहानी",
         scene_id: int = 1,
     ):
-        """
-        Renders a rich 1920x1080 (16:9) Indian Storybook Landscape Painting with:
-        - Golden-hour / twilight sky gradient, glowing sun/moon mandala, layered forested hills & river reflections
-        - Ornate Indian temple/archway border and proper Devanagari typography (`Noto Sans Devanagari`)
-        """
+        """Renders a full-bleed 1920x1080 (16:9) atmospheric cinema landscape for offline test runs."""
         w, h = 1920, 1080
         scene = scene or {}
         yy, xx = np.mgrid[0:h, 0:w]
@@ -391,14 +411,10 @@ class MediaFetcher:
         tx = xx.astype(np.float32) / max(1, w - 1)
 
         palettes = [
-            # Golden Sunrise over Narmada River
-            ((42, 22, 58), (185, 82, 48), (242, 168, 62)),
-            # Lush Emerald Champakavan Forest
-            ((16, 44, 52), (34, 96, 78), (188, 152, 68)),
-            # Royal Indraprastha Evening
-            ((24, 20, 56), (92, 44, 98), (225, 138, 72)),
-            # Sacred Banyan Twilight
-            ((18, 34, 62), (48, 88, 122), (218, 165, 75)),
+            ((28, 38, 64), (165, 88, 52), (235, 165, 75)),
+            ((14, 42, 50), (32, 92, 76), (175, 145, 68)),
+            ((22, 24, 58), (85, 48, 92), (215, 132, 68)),
+            ((16, 32, 58), (44, 84, 118), (210, 160, 72)),
         ]
         top_c, mid_c, bot_c = palettes[(scene_id - 1) % len(palettes)]
 
@@ -406,13 +422,11 @@ class MediaFetcher:
         g = np.where(ty < 0.55, top_c[1] + (mid_c[1] - top_c[1]) * (ty / 0.55), mid_c[1] + (bot_c[1] - mid_c[1]) * ((ty - 0.55) / 0.45))
         b = np.where(ty < 0.55, top_c[2] + (mid_c[2] - top_c[2]) * (ty / 0.55), mid_c[2] + (bot_c[2] - mid_c[2]) * ((ty - 0.55) / 0.45))
 
-        # Sun/Moon glow
         sun_x = 0.72 if scene_id % 2 == 1 else 0.28
         sun_y = 0.34
         dist = np.sqrt((tx - sun_x) ** 2 * 1.8 + (ty - sun_y) ** 2)
         glow = np.exp(-dist * 5.5) * 95.0
 
-        # Layered distant hills and river silhouette
         hill1 = 0.62 + 0.04 * np.sin(tx * 7.0 + scene_id) + 0.02 * np.cos(tx * 15.0)
         hill2 = 0.72 + 0.03 * np.cos(tx * 9.0 + scene_id * 2)
         in_hill1 = ty > hill1
@@ -432,38 +446,4 @@ class MediaFetcher:
 
         arr = np.stack([r, g, b], axis=-1).astype(np.uint8)
         img = Image.fromarray(arr, mode="RGB")
-        d = ImageDraw.Draw(img)
-
-        gold = (245, 198, 92)
-        cream = (252, 246, 232)
-
-        def get_font(size: int, bold: bool = True):
-            candidates = [
-                "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
-                "/usr/share/fonts/truetype/noto/NotoSerifDevanagari-Bold.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            ]
-            for fp in candidates:
-                if Path(fp).exists():
-                    try:
-                        return ImageFont.truetype(fp, size)
-                    except Exception:
-                        pass
-            return ImageFont.load_default()
-
-        # Ornate frame & mandala rings
-        d.rectangle((42, 36, w - 42, h - 36), outline=gold, width=3)
-        d.rectangle((54, 48, w - 54, h - 48), outline=(180, 140, 65), width=1)
-
-        cx, cy = int(w * sun_x), int(h * sun_y)
-        for rad in (140, 105, 72):
-            d.ellipse((cx - rad, cy - rad, cx + rad, cy + rad), outline=gold, width=2)
-
-        callout = str(scene.get("on_screen_callout") or "भारतीय लोककथा").strip()
-        speaker = str(scene.get("speaker_name") or "कथावाचक").strip()
-        d.text((96, 82), f"✦ {callout}  |  {speaker}", font=get_font(34, True), fill=gold)
-
-        subject = str(scene.get("visual_subject") or topic).strip()
-        d.text((96, 145), subject[:78], font=get_font(28, False), fill=cream)
-
         img.save(dest_path, quality=95)

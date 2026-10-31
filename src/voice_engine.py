@@ -1,17 +1,14 @@
 """
-Multi-Character Hindi Neural Voiceover + Devanagari Word-Boundary Timestamp Engine (`src/voice_engine.py`):
-- Automatically switches Hindi voices whenever a different character speaks in the story:
-  1. **Narrator (`narrator`)**: `hi-IN-MadhurNeural` (Warm, clear storytelling pace `+0%`, pitch `+0Hz`)
-  2. **Female Character (`female_character` or `speaker_gender == "female"`)**: `hi-IN-SwaraNeural` (Expressive female Hindi voice `+2%`, pitch `+2Hz`)
-  3. **Male Protagonist / Clever Hero (`male_protagonist`)**: `hi-IN-MadhurNeural` (Bright, energetic young pitch `+6Hz`, rate `+5%`)
-  4. **Male Antagonist / Lion / Crocodile / King (`male_antagonist`)**: `hi-IN-MadhurNeural` (Deep resonant pitch `-8Hz`, rate `-3%`)
-  5. **Wise Elder / Guru / Sage (`wise_elder`)**: `hi-IN-MadhurNeural` (Calm, dignified pitch `-4Hz`, rate `-5%`)
-  6. **Young Character / Child / Small Bird (`young_character`)**: `hi-IN-SwaraNeural` (Cheerful high pitch `+8Hz`, rate `+6%`)
-- Supports Azure Cognitive Services Speech SDK (`AZURE_SPEECH_KEY`/`AZURE_SPEECH_REGION`) with automatic fallback to `edge-tts` (`hi-IN-MadhurNeural` & `hi-IN-SwaraNeural`), and an offline synthesized warm vocal cadence fallback when running in air-gapped CI/test sandboxes.
-- Preserves full Devanagari tokens (joining combining matras and punctuation cleanly) so Hindi subtitles never split vowel signs (`ा`, `ि`, `ी`, `ु`, `ू`, `े`, `ै`, `ो`, `ौ`, `ं`, `ँ`, `्`).
+Young Male & Young Female Multi-Character Hindi Neural Voiceover Engine (`src/voice_engine.py` — v2.0 Youthful Edition):
+- Tuned specifically for **Young, Energetic Indian Storytelling** (like top Hindi YouTube creators & Pocket FM):
+  1. **Young Male Narrator (`narrator`)**: `hi-IN-MadhurNeural` (or `hi-IN-ArjunNeural` on Azure) with youthful `+6%` speech rate and `+4Hz` bright pitch so the voice never sounds slow or elderly!
+  2. **Young Female Character (`female_character` or `speaker_gender == "female"`)**: `hi-IN-SwaraNeural` (or `hi-IN-KavyaNeural` / `hi-IN-AnanyaNeural` on Azure) with lively `+6%` speech rate and `+5Hz` bright youthful female pitch!
+  3. **Young Clever Male Protagonist (`male_protagonist`)**: `hi-IN-MadhurNeural` (`+9%` speech rate, `+8Hz` energetic young hero pitch)
+  4. **Dramatic Male Antagonist (`male_antagonist`)**: `hi-IN-MadhurNeural` (`+3%` speech rate, `-2Hz` crisp dramatic tone — clear and youthful, never sluggish)
+  5. **Young Child / Small Bird (`young_character`)**: `hi-IN-SwaraNeural` (`+10%` speech rate, `+10Hz` cheerful voice)
+- Preserves intact Devanagari words and matras (`ा`, `ि`, `ी`, `ु`, `ू`, `े`, `ै`, `ो`, `ौ`, `ं`, `ँ`, `्`, `।`).
 """
 import asyncio
-import math
 import os
 import re
 import subprocess
@@ -22,17 +19,17 @@ from typing import Dict, List, Tuple
 from xml.sax.saxutils import escape
 import numpy as np
 
-DEFAULT_HINDI_MALE_VOICE = "hi-IN-MadhurNeural"
-DEFAULT_HINDI_FEMALE_VOICE = "hi-IN-SwaraNeural"
+DEFAULT_YOUNG_HINDI_MALE_VOICE = "hi-IN-MadhurNeural"
+DEFAULT_YOUNG_HINDI_FEMALE_VOICE = "hi-IN-SwaraNeural"
 
-# Character Role -> (env_override_key, default_voice, rate_offset_pct, pitch_hz)
+# Character Role -> (env_override_key, default_voice, youthful_rate_pct, youthful_pitch_hz)
 CHARACTER_VOICE_PROFILES: Dict[str, Tuple[str, str, int, str]] = {
-    "narrator": ("HINDI_NARRATOR_VOICE", DEFAULT_HINDI_MALE_VOICE, 0, "+0Hz"),
-    "female_character": ("HINDI_FEMALE_VOICE", DEFAULT_HINDI_FEMALE_VOICE, 2, "+2Hz"),
-    "male_protagonist": ("HINDI_MALE_HERO_VOICE", DEFAULT_HINDI_MALE_VOICE, 5, "+5Hz"),
-    "male_antagonist": ("HINDI_MALE_DEEP_VOICE", DEFAULT_HINDI_MALE_VOICE, -3, "-7Hz"),
-    "wise_elder": ("HINDI_ELDER_VOICE", DEFAULT_HINDI_MALE_VOICE, -4, "-4Hz"),
-    "young_character": ("HINDI_CHILD_VOICE", DEFAULT_HINDI_FEMALE_VOICE, 6, "+7Hz"),
+    "narrator": ("HINDI_NARRATOR_VOICE", DEFAULT_YOUNG_HINDI_MALE_VOICE, 6, "+4Hz"),
+    "female_character": ("HINDI_FEMALE_VOICE", DEFAULT_YOUNG_HINDI_FEMALE_VOICE, 6, "+5Hz"),
+    "male_protagonist": ("HINDI_MALE_HERO_VOICE", DEFAULT_YOUNG_HINDI_MALE_VOICE, 9, "+8Hz"),
+    "male_antagonist": ("HINDI_MALE_DEEP_VOICE", DEFAULT_YOUNG_HINDI_MALE_VOICE, 3, "-2Hz"),
+    "wise_elder": ("HINDI_ELDER_VOICE", DEFAULT_YOUNG_HINDI_MALE_VOICE, 4, "+2Hz"),
+    "young_character": ("HINDI_CHILD_VOICE", DEFAULT_YOUNG_HINDI_FEMALE_VOICE, 10, "+10Hz"),
 }
 
 
@@ -65,10 +62,10 @@ class VoiceEngine:
     def __init__(self):
         self.speech_key = os.getenv("AZURE_SPEECH_KEY", "").strip()
         self.speech_region = os.getenv("AZURE_SPEECH_REGION", "centralindia").strip()
-        self.male_voice = os.getenv("AZURE_TTS_VOICE", DEFAULT_HINDI_MALE_VOICE).strip() or DEFAULT_HINDI_MALE_VOICE
+        self.male_voice = os.getenv("AZURE_TTS_VOICE", DEFAULT_YOUNG_HINDI_MALE_VOICE).strip() or DEFAULT_YOUNG_HINDI_MALE_VOICE
         if not self.male_voice.lower().startswith("hi-in"):
-            self.male_voice = DEFAULT_HINDI_MALE_VOICE
-        self.female_voice = os.getenv("AZURE_TTS_FEMALE_VOICE", DEFAULT_HINDI_FEMALE_VOICE).strip() or DEFAULT_HINDI_FEMALE_VOICE
+            self.male_voice = DEFAULT_YOUNG_HINDI_MALE_VOICE
+        self.female_voice = os.getenv("AZURE_TTS_FEMALE_VOICE", DEFAULT_YOUNG_HINDI_FEMALE_VOICE).strip() or DEFAULT_YOUNG_HINDI_FEMALE_VOICE
 
         raw_speed = os.getenv("VOICE_SPEED_PERCENT", "0").strip().replace("%", "").replace("+", "")
         try:
@@ -78,24 +75,24 @@ class VoiceEngine:
 
     def resolve_voice_for_scene(self, scene: dict) -> Tuple[str, int, str]:
         """
-        Determines the exact `(voice_name, rate_pct, pitch_hz)` for a scene based on `speaker_gender` and `speaker_role`.
-        Guarantees that any female character (`speaker_gender == 'female'` or `speaker_role == 'female_character'`)
-        uses the female Hindi neural voice (`hi-IN-SwaraNeural`).
+        Determines the exact `(voice_name, rate_pct, pitch_hz)` for a scene using young male and young female prosody.
         """
         role = str(scene.get("speaker_role") or "narrator").strip().lower()
         gender = str(scene.get("speaker_gender") or "").strip().lower()
         speaker_name = str(scene.get("speaker_name") or "").strip().lower()
 
-        # Detect female character from gender, role, or Hindi/English speaker name
-        female_indicators = ("female", "wife", "queen", "princess", "mother", "पत्नी", "रानी", "राजकुमारी", "माँ", "बंदरिया", "ब्राह्मणी", "महिला", "देवी", "चुहिया", "लोमड़ी")
+        female_indicators = (
+            "female", "wife", "queen", "princess", "mother", "पत्नी", "रानी",
+            "राजकुमारी", "माँ", "बंदरिया", "ब्राह्मणी", "महिला", "देवी", "चुहिया", "लोमड़ी", "भाभी"
+        )
         if gender == "female" or role == "female_character" or any(tok in speaker_name for tok in female_indicators):
-            voice = os.getenv("HINDI_FEMALE_VOICE", self.female_voice).strip() or DEFAULT_HINDI_FEMALE_VOICE
-            return voice, self.base_speed_pct + 2, "+2Hz"
+            voice = os.getenv("HINDI_FEMALE_VOICE", self.female_voice).strip() or DEFAULT_YOUNG_HINDI_FEMALE_VOICE
+            return voice, self.base_speed_pct + 6, "+5Hz"
 
         env_key, default_v, rate_delta, pitch_hz = CHARACTER_VOICE_PROFILES.get(
             role, CHARACTER_VOICE_PROFILES["narrator"]
         )
-        fallback_v = self.female_voice if default_v == DEFAULT_HINDI_FEMALE_VOICE else self.male_voice
+        fallback_v = self.female_voice if default_v == DEFAULT_YOUNG_HINDI_FEMALE_VOICE else self.male_voice
         voice = os.getenv(env_key, fallback_v).strip() or fallback_v
         return voice, self.base_speed_pct + rate_delta, pitch_hz
 
@@ -113,7 +110,7 @@ class VoiceEngine:
             text = str(scene.get("narration", "")).strip()
             voice_name, rate_pct, pitch_hz = self.resolve_voice_for_scene(scene)
             role = str(scene.get("speaker_role") or "narrator")
-            gender = "female" if voice_name == self.female_voice or "swara" in voice_name.lower() else "male"
+            gender = "female" if voice_name == self.female_voice or "swara" in voice_name.lower() or "kavya" in voice_name.lower() else "male"
 
             scene_mp3 = output_dir / f"scene_{scene_id:02d}.mp3"
             words_with_rel_times = self._synthesize_single_clip(
@@ -140,6 +137,8 @@ class VoiceEngine:
 
             scene_copy = dict(scene)
             scene_copy["voice_used"] = voice_name
+            scene_copy["voice_rate_pct"] = rate_pct
+            scene_copy["voice_pitch_hz"] = pitch_hz
             scene_copy["speaker_gender"] = gender
             scene_copy["start_sec"] = round(current_offset, 3)
             scene_copy["duration_sec"] = round(clip_dur, 3)
@@ -177,9 +176,9 @@ class VoiceEngine:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        voices_summary = sorted({s["voice_used"] for s in enriched_scenes})
+        voices_summary = sorted({f"{s['voice_used']} ({s['voice_pitch_hz']})" for s in enriched_scenes})
         print(
-            f"[VoiceEngine] Synthesized {len(enriched_scenes)} Hindi scenes using voices {voices_summary} "
+            f"[VoiceEngine] Synthesized {len(enriched_scenes)} Hindi scenes with Young Voices {voices_summary} "
             f"({current_offset:.1f}s total, {len(all_word_timings)} synced Devanagari words)."
         )
         return master_vo, all_word_timings, enriched_scenes
@@ -226,8 +225,8 @@ class VoiceEngine:
 
         def on_word(evt):
             start_s = evt.audio_offset / 10_000_000.0
-            dur_s = evt.duration.total_seconds() if evt.duration else 0.24
-            word_boundaries.append((evt.text, start_s, start_s + max(dur_s, 0.14)))
+            dur_s = evt.duration.total_seconds() if evt.duration else 0.22
+            word_boundaries.append((evt.text, start_s, start_s + max(dur_s, 0.12)))
 
         synthesizer.synthesis_word_boundary.connect(on_word)
 
@@ -243,7 +242,6 @@ class VoiceEngine:
             raise RuntimeError(f"Azure Speech synthesis failed: {result.reason}")
 
         dur = get_audio_duration(out_mp3)
-        # Re-align with full whitespace-delimited Devanagari words if SDK split combining marks
         return self._align_or_estimate_hindi_words(text, word_boundaries, dur)
 
     async def _call_edge_tts_with_boundaries(
@@ -272,7 +270,7 @@ class VoiceEngine:
                 elif chunk["type"] == "WordBoundary":
                     start_s = chunk["offset"] / 10_000_000.0
                     dur_s = chunk["duration"] / 10_000_000.0
-                    word_boundaries.append((chunk["text"], start_s, start_s + max(dur_s, 0.14)))
+                    word_boundaries.append((chunk["text"], start_s, start_s + max(dur_s, 0.12)))
 
         dur = get_audio_duration(out_mp3)
         return self._align_or_estimate_hindi_words(text, word_boundaries, dur)
@@ -284,10 +282,6 @@ class VoiceEngine:
         raw_boundaries: List[Tuple[str, float, float]],
         total_duration: float,
     ) -> List[Tuple[str, float, float]]:
-        """
-        Ensures Devanagari words and matras (`ा`, `ि`, `ी`, `ु`, `ू`, `े`, `ै`, `ो`, `ौ`, `ं`, `ँ`, `्`, `।`)
-        stay intact as complete Hindi words rather than fragmented syllables.
-        """
         clean_words = [w for w in re.split(r"\s+", full_text.strip()) if w]
         if not clean_words:
             return []
@@ -301,18 +295,14 @@ class VoiceEngine:
     def _generate_offline_cadence_audio(
         self, text: str, out_mp3: Path, voice_name: str
     ) -> List[Tuple[str, float, float]]:
-        """
-        Offline air-gapped fallback: generates a soft, pleasant harmonic voice cadence WAV->MP3
-        with distinct fundamental frequency for male (`135Hz`) vs female (`215Hz`) characters.
-        """
         words = [w for w in re.split(r"\s+", text.strip()) if w]
-        dur = max(3.2, min(14.0, len(words) * 0.36))
+        dur = max(3.2, min(16.0, len(words) * 0.34))
         sr = 44100
         n = int(sr * dur)
         t = np.linspace(0, dur, n, endpoint=False)
 
-        f0 = 215.0 if ("swara" in voice_name.lower() or "female" in voice_name.lower()) else 135.0
-        syllable_env = 0.55 + 0.45 * np.sin(2 * np.pi * 3.2 * t)
+        f0 = 225.0 if ("swara" in voice_name.lower() or "female" in voice_name.lower()) else 150.0
+        syllable_env = 0.55 + 0.45 * np.sin(2 * np.pi * 3.5 * t)
         carrier = (
             0.60 * np.sin(2 * np.pi * f0 * t)
             + 0.25 * np.sin(2 * np.pi * (f0 * 1.5) * t)

@@ -1,17 +1,11 @@
 /**
- * Free AI Image Generation API using Cloudflare Workers AI
+ * Free AI Image Generation API using Cloudflare Workers AI (v2.0 — Photorealistic 16:9 Edition)
  * Based on https://github.com/saurav-z/free-image-generation-api
  *
  * Supports:
- * - @cf/black-forest-labs/flux-1-schnell (fast, high quality, ~173 free images/day on 10,000 free daily neurons)
- * - @cf/stabilityai/stable-diffusion-xl-base-1.0 (classic SDXL)
- * - @cf/bytedance/stable-diffusion-xl-lightning (ultra-fast 4-step SDXL)
- *
- * Setup Instructions:
- * 1. Deploy this script to Cloudflare Workers.
- * 2. Add Workers AI Binding named `AI` (Settings -> Variables -> Service Bindings -> AI -> Workers AI).
- * 3. Add Environment Variable `API_KEY` (Settings -> Variables -> Environment Variables -> API_KEY = your-secret-key).
- * 4. Copy your Worker URL into `FREE_IMAGE_API_URL` and `FREE_IMAGE_API_KEY` in GitHub Secrets!
+ * - @cf/black-forest-labs/flux-1-schnell (Photorealistic, ~173 free images/day on 10,000 free daily neurons)
+ * - @cf/bytedance/stable-diffusion-xl-lightning (Native 1344x768 16:9 widescreen generation)
+ * - @cf/stabilityai/stable-diffusion-xl-base-1.0 (Native 1344x768 16:9 widescreen generation)
  */
 
 export default {
@@ -30,7 +24,7 @@ export default {
       return new Response(
         JSON.stringify({
           status: "ok",
-          service: "free-image-generation-api (Indian Kahani 16:9 Edition)",
+          service: "free-image-generation-api (Indian Kahani Photorealistic 16:9 Edition)",
           repo: "https://github.com/saurav-z/free-image-generation-api",
           models: [
             "@cf/black-forest-labs/flux-1-schnell",
@@ -49,7 +43,6 @@ export default {
       });
     }
 
-    // Verify API_KEY if configured in Worker Environment Variables
     const expectedKey = (env.API_KEY || "").trim();
     if (expectedKey) {
       const authHeader = request.headers.get("Authorization") || "";
@@ -66,7 +59,7 @@ export default {
     if (!env.AI) {
       return new Response(
         JSON.stringify({
-          error: "Workers AI binding 'AI' is missing! Go to Worker Settings -> Variables -> Service Bindings -> Add binding named 'AI' linked to Workers AI.",
+          error: "Workers AI binding 'AI' is missing! Go to Worker Settings -> Bindings -> Add Workers AI binding named 'AI'.",
         }),
         { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
@@ -74,13 +67,18 @@ export default {
 
     try {
       const body = await request.json();
-      const prompt = (body.prompt || "").trim();
-      if (!prompt) {
+      const rawPrompt = (body.prompt || "").trim();
+      if (!rawPrompt) {
         return new Response(JSON.stringify({ error: "Missing 'prompt' in JSON body" }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+
+      // Enforce photorealistic 16:9 widescreen composition in prompt
+      const prompt = rawPrompt.includes("photorealistic")
+        ? rawPrompt
+        : `${rawPrompt}, ultra-realistic 8k cinematic wildlife and historical live-action photography, shot on ARRI Alexa 65, 35mm anamorphic lens, natural photorealistic textures, wide 16:9 horizontal widescreen framing, NOT cartoon, NOT 2D illustration, no text, no watermarks`;
 
       const model = body.model || "@cf/black-forest-labs/flux-1-schnell";
       const width = Number(body.width) || 1344;
@@ -88,15 +86,20 @@ export default {
       const steps = Number(body.num_steps || body.steps) || 4;
 
       let inputs = { prompt };
-      if (model.includes("flux")) {
-        inputs = { prompt, num_steps: Math.min(8, Math.max(1, steps)) };
+      if (model.includes("flux-1-schnell")) {
+        inputs = { prompt, steps: Math.min(8, Math.max(4, steps)) };
       } else {
-        inputs = { prompt, width, height, num_steps: Math.min(20, Math.max(4, steps)) };
+        inputs = {
+          prompt,
+          negative_prompt: "cartoon, anime, 2d illustration, comic, vector, drawing, sketch, deformed, blurry, watermark, text",
+          width,
+          height,
+          num_steps: Math.min(20, Math.max(4, steps)),
+        };
       }
 
       const response = await env.AI.run(model, inputs);
 
-      // Flux models return { image: "<base64>" } while SDXL models return a binary ReadableStream
       if (response && typeof response === "object" && "image" in response && typeof response.image === "string") {
         const binaryString = atob(response.image);
         const bytes = new Uint8Array(binaryString.length);
