@@ -80,7 +80,8 @@ def _write_github_step_summary(
         "### 📊 Visual & Multi-Character Voice Breakdown",
         "| Metric | Value | Cost Impact |",
         "| :--- | :--- | :--- |",
-        f"| **🎨 Free AI Images (`saurav-z/free-image-generation-api`)** | **`{fetcher.free_worker_images_used}` scenes** | **₹0 / $0.00 (Free Tier)** |",
+        f"| **🎨 Primary `gpt-image-1-mini` Widescreen Shots** | **`{fetcher.gpt_images_used}` shots (`1536x1024` -> `1920x1080`)** | **Default Primary (`{fetcher.image_model}`)** |",
+        f"| **⚡ Fallback Cloudflare Worker Shots** | **`{fetcher.free_worker_images_used}` shots** | **Fallback** |",
         f"| **🖼️ Total AI / Storybook Scene Plates** | **`{len(scenes)}` scenes (16:9)** | **₹0 / $0.00** |",
         f"| **🎙️ Hindi Voices Used** | **`{', '.join(sorted({s.get('voice_used', '') for s in scenes}))}`** | **Multi-Character** |",
         "",
@@ -141,6 +142,7 @@ def run_pipeline():
         topic=topic,
         wikipedia_articles=storyboard.get("wikipedia_articles", ["Panchatantra"]),
         llm_client=llm,
+        character_bible=storyboard.get("character_bible") or {},
     )
     for scene in enriched_scenes:
         asset_path, asset_type = fetcher.fetch_scene_asset(scene, temp_dir / "media")

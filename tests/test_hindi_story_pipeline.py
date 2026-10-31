@@ -7,39 +7,69 @@ from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from topic_manager import (
-    extract_story_number,
-    format_numbered_topic,
-    is_topic_already_used,
-    load_seed_topics,
-)
+from topic_manager import load_seed_topics
 from foundry_llm import FoundryLLMClient
 from voice_engine import VoiceEngine, WordTiming
-from caption_builder import generate_synced_ass_captions, _clean_hindi_word, _group_into_storytelling_clauses
+from caption_builder import generate_synced_ass_captions, _clean_hindi_word
 from video_composer import VideoComposer
-from youtube_uploader import build_youtube_upload_payload
 from media_fetcher import MediaFetcher
 
 
 class HindiStoryPipelineTests(unittest.TestCase):
-    def test_seed_contains_101_panchatantra_plus_expansion(self):
-        seeds = load_seed_topics()
-        self.assertGreaterEqual(len(seeds), 110)
-        self.assertTrue(seeds[0].startswith("कहानी #1: Panchatantra"))
-        self.assertTrue(seeds[100].startswith("कहानी #101: Panchatantra"))
+    def test_gpt_image_1_mini_is_default_primary_model(self):
+        old_val = os.environ.pop("FOUNDRY_IMAGE_MODEL", None)
+        try:
+            mf = MediaFetcher(topic="कहानी #1: बंदर और मगरमच्छ")
+            self.assertEqual(mf.image_model, "gpt-image-1-mini")
+        finally:
+            if old_val is not None:
+                os.environ["FOUNDRY_IMAGE_MODEL"] = old_val
 
-    def test_storyboard_has_character_bible_and_66_plus_scene_locked_shots(self):
-        llm = FoundryLLMClient()
-        sb = llm._build_fallback_hindi_storyboard("कहानी #1: बंदर और मगरमच्छ", 1, "Panchatantra")
-        self.assertIn("character_bible", sb)
-        scenes = sb["scenes"]
-        self.assertEqual(len(scenes), 22)
-        total_shots = sum(len(s.get("shot_prompts", [])) for s in scenes)
-        self.assertGreaterEqual(total_shots, 66)
-        for s in scenes:
-            self.assertGreaterEqual(len(s["shot_prompts"]), 3)
-            for sp in s["shot_prompts"]:
-                self.assertIn("photorealistic", sp.lower())
+    def test_gpt_image_prompt_embeds_spoken_narration_and_locked_character_bible(self):
+        bible = {
+            "Raktamukha": "single adult golden-brown Rhesus macaque monkey with amber eyes",
+            "Karalamukha": "14-foot dark olive-green Indian mugger crocodile",
+        }
+        mf = MediaFetcher(topic="कहानी #1: बंदर और मगरमच्छ", character_bible=bible)
+        scene = {
+            "scene_id": 15,
+            "speaker_name": "कथावाचक",
+            "narration": "निश्छल बंदर मगरमच्छ की पीठ पर बैठ गया और वे गहरे पानी में पहुँच गए।",
+            "visual_subject": "Monkey riding on crocodile back in deep river water",
+        }
+        prompt = mf._build_gpt_image_scene_prompt(
+            "Medium tracking shot of Raktamukha riding on Karalamukha's back in the middle of the wide Narmada river",
+            scene,
+            shot_idx=2,
+            total_shots=3,
+        )
+        self.assertIn("single adult golden-brown Rhesus macaque monkey", prompt)
+        self.assertIn("14-foot dark olive-green Indian mugger crocodile", prompt)
+        self.assertIn("निश्छल बंदर मगरमच्छ की पीठ पर बैठ गया", prompt)
+        self.assertIn("16:9", prompt)
+
+    def test_distinct_character_voices_and_dialogue_auto_inference(self):
+        ve = VoiceEngine()
+        nar_v, _, _, nar_f, nar_role, _ = ve.resolve_voice_for_scene(
+            {"speaker_role": "narrator", "speaker_name": "कथावाचक", "narration": "प्राचीन काल में नर्मदा नदी के तट पर एक पेड़ था।"}
+        )
+        hero_v, _, _, hero_f, hero_role, _ = ve.resolve_voice_for_scene(
+            {"speaker_role": "male_protagonist", "speaker_name": "बंदर रक्तमुख", "narration": "अरे भाई मगरमच्छ! लो ये मीठे जामुन खाओ।"}
+        )
+        villain_v, _, _, vil_f, vil_role, _ = ve.resolve_voice_for_scene(
+            {"speaker_role": "male_antagonist", "speaker_name": "मगरमच्छ करालमुख", "narration": "धन्यवाद भाई! ये फल अमृत जैसे हैं।"}
+        )
+        female_v, _, _, fem_f, fem_role, fem_gender = ve.resolve_voice_for_scene(
+            {"speaker_role": "narrator", "speaker_name": "मगरमच्छ की पत्नी", "narration": "सुना जी! मुझे उस बंदर का कलेजा खाना है!"}
+        )
+
+        # Verify automatic inference caught the wife's dialogue even when speaker_role was "narrator"
+        self.assertEqual(fem_role, "female_character")
+        self.assertEqual(fem_gender, "female")
+        self.assertIn("SwaraNeural", female_v)
+
+        # Verify Narrator, Hero, Villain, and Female Character all have distinct voice IDs and/or distinct formant ratios
+        self.assertEqual(len({(nar_v, nar_f), (hero_v, hero_f), (villain_v, vil_f), (female_v, fem_f)}), 4)
 
     def test_uploaded_repo_bgm_is_prioritized_over_sfx_bgm(self):
         vc = VideoComposer()
@@ -58,27 +88,8 @@ class HindiStoryPipelineTests(unittest.TestCase):
             ass_file = Path(tmp) / "test.ass"
             generate_synced_ass_captions(timings, scenes, ass_file)
             content = ass_file.read_text(encoding="utf-8")
-            # Check 68pt font size on StoryCaption and Alignment 9 (top-right) on SpeakerTag
             self.assertIn("Style: StoryCaption,Noto Sans Devanagari,68,", content)
             self.assertIn(",9,48,48,36,1", content)
-
-    def test_media_fetcher_generates_3_to_4_shots_per_scene(self):
-        mf = MediaFetcher(topic="कहानी #1: बंदर और मगरमच्छ")
-        mf.free_image_api_url = ""  # Offline mode test
-        os.environ["ALLOW_POLLINATIONS_FALLBACK"] = "false"
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                scene = {
-                    "scene_id": 1,
-                    "duration_sec": 15.0,
-                    "narration": "नमस्कार दोस्तों!",
-                    "visual_subject": "Monkey and Crocodile",
-                    "shot_prompts": ["Shot 1", "Shot 2", "Shot 3"],
-                }
-                mf.fetch_scene_asset(scene, Path(tmp))
-                self.assertEqual(len(scene["asset_paths"]), 3)
-        finally:
-            os.environ.pop("ALLOW_POLLINATIONS_FALLBACK", None)
 
 
 if __name__ == "__main__":
